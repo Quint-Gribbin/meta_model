@@ -49,8 +49,6 @@ def main(rolling_train_length=2100,
 
     YIELDS_TABLE = "issachar-feature-library.core_raw.factor_yields"
     INDEX_RETURNS_TABLE = "josh-risk.IssacharReporting.Index_Returns"
-    PORTFOLIO_FRESHNESS = 5
-    FACTOR_FRESHNESS = 60
 
     # Import key libraries
     import pandas as pd
@@ -103,8 +101,12 @@ def main(rolling_train_length=2100,
 
     set_random_seeds(random_seed)
 
-    # Initialize the BigQuery client
+    # Initialize the GCS clients
+    PROJECT_ID = "issachar-feature-library"
+    STAGING_BUCKET = "gs://qjg-test"
+    DESTINATION_DATASET = "qjg_meta_model"
     client = bigquery.Client(project="issachar-feature-library")
+    storage_client = storage.Client(project=PROJECT_ID)
 
     # Function to fetch data from the specified table
     def read_table_to_dataframe(client, table_id, query=None):
@@ -1876,6 +1878,133 @@ def main(rolling_train_length=2100,
 
     leakage_results = detect_feature_leakage(df_long, target_column="returns", feature_columns=feature_columns)
 
+    def sanitize_and_convert_columns(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Sanitize column names to meet BigQuery requirements and convert
+        datetime64[ns, UTC] columns to datetime64[ns] for compatibility.
+        """
+        # Sanitize column names
+        df = df.rename(columns=lambda col: (
+            col.replace(" ", "_")
+            .replace("%", "pct")
+            .replace("(", "")
+            .replace(")", "")
+            .replace("-", "_")
+            .replace("/", "_")
+            .lower()
+        ))
+        # Convert datetime64[ns, UTC] to datetime64[ns]
+        for col in df.select_dtypes(include=["datetime64[ns, UTC]"]).columns:
+            df[col] = df[col].dt.tz_localize(None)
+
+        return df
+
+    def append_to_bigquery(
+        df: pd.DataFrame,
+        dataset_id: str,
+        table_name: str,
+        project_id: str = PROJECT_ID
+    ) -> None:
+        """
+        Append data to a BigQuery table, automatically creating the table if it
+        doesn't exist and inferring the schema from the DataFrame.
+        """
+        table_id = f"{project_id}.{dataset_id}.{table_name}"
+
+        # Convert datetime64[ns] columns to timestamp-friendly strings
+        for col in df.select_dtypes(include=["datetime64[ns]"]).columns:
+            df[col] = df[col].dt.strftime('%Y-%m-%d %H:%M:%S')
+
+        job_config = bigquery.LoadJobConfig(
+            write_disposition=bigquery.WriteDisposition.WRITE_APPEND
+        )
+
+        try:
+            load_job = client.load_table_from_dataframe(
+                df, table_id, job_config=job_config
+            )
+            load_job.result()
+            logging.info(f"Appended data to table {table_id} successfully.")
+        except Exception as e:
+            logging.error(f"Failed to append data to {table_id}: {str(e)}")
+            raise
+
+    def create_or_replace_bigquery_table(
+        df: pd.DataFrame,
+        dataset_id: str,
+        table_name: str,
+        project_id: str = PROJECT_ID
+    ) -> None:
+        """
+        Create or replace a BigQuery table using the data from a DataFrame.
+        The table schema is automatically inferred from the DataFrame,
+        and any existing table will be replaced.
+        """
+        table_id = f"{project_id}.{dataset_id}.{table_name}"
+
+        # Convert datetime64[ns] columns to a format that BigQuery can interpret as a timestamp.
+        for col in df.select_dtypes(include=["datetime64[ns]"]).columns:
+            df[col] = df[col].dt.strftime('%Y-%m-%d %H:%M:%S')
+
+        # Configure the job to create or replace the table.
+        job_config = bigquery.LoadJobConfig(
+            write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
+        )
+
+        try:
+            load_job = client.load_table_from_dataframe(
+                df, table_id, job_config=job_config
+            )
+            load_job.result()  # Wait for the load job to complete.
+            logging.info(f"Created or replaced table {table_id} successfully.")
+        except Exception as e:
+            logging.error(f"Failed to create or replace table {table_id}: {str(e)}")
+            raise
+
+    def save_performance_figure_to_gcs(performance_fig, staging_bucket, performance_plot_name):
+        """
+        Save a Matplotlib figure directly to GCS using an in-memory buffer.
+        """
+        # Create an in-memory bytes buffer
+        buffer = io.BytesIO()
+
+        # Save the figure to the buffer in PNG format
+        performance_fig.savefig(buffer, format='png')
+        buffer.seek(0)  # Move to the beginning of the buffer
+
+        # Read the bytes from the buffer
+        plot_content = buffer.getvalue()
+
+        # Upload to GCS
+        save_to_gcs(staging_bucket, performance_plot_name, plot_content)
+
+        # Close the buffer
+        buffer.close()
+
+
+    def save_to_gcs(bucket_name: str, file_name: str, content: bytes) -> None:
+        """
+        Save in-memory content (e.g., CSV string, image bytes) to a file in GCS.
+
+        Parameters
+        ----------
+        bucket_name : str
+            The name of the GCS bucket (with or without "gs://").
+        file_name : str
+            The destination file path in the bucket.
+        content : bytes
+            The data to upload.
+        """
+        bucket_name_clean = bucket_name.replace("gs://", "")
+        bucket = storage_client.bucket(bucket_name_clean)
+        blob = bucket.blob(file_name)
+
+        if isinstance(content, str):
+            content = content.encode('utf-8')  # Convert to bytes if necessary
+
+        blob.upload_from_string(content)
+        logging.info(f"File {file_name} saved to {bucket_name_clean}.")
+
 
     #################################################################################
     # 3. Train Meta Model based on the features and returns
@@ -2122,7 +2251,9 @@ def main(rolling_train_length=2100,
 
     print("Confusion matrix:\n", confusion_matrix(y_test, y_pred))
 
-    metrics_df = pd.DataFrame([{"accuracy":accuracy, "precision":precision, "recall":recall, "f1":f1, "roc_auc":roc_auc, "brier": brier, 'uuid':uuid}])
+    ensemble = "simple average"
+    metrics_df = sanitize_and_convert_columns(pd.DataFrame([{"accuracy":accuracy, "precision":precision, "recall":recall, "f1":f1, "roc_auc":roc_auc, "brier": brier, "ensemble":ensemble, 'uuid':uuid}]))
+    append_to_bigquery(metrics_df, DESTINATION_DATASET, f'meta_model_metrics_{table_suffix}')
 
     # -------------------- 6.  Diagnostic plots -----------------------
     import matplotlib.pyplot as plt
@@ -2163,7 +2294,7 @@ def main(rolling_train_length=2100,
     plt.show()
 
     # d) Calibration curve
-    prob_true, prob_pred = calibration_curve(y_test, y_pred_proba, n_bins=10)
+    prob_true, prob_pred = calibration_curve(y_test, y_pred_proba, n_bins=50)
     calibration_curve_plot = plt.figure(figsize=(6,4))
     plt.plot(prob_pred, prob_true, marker="o")
     plt.plot([0,1],[0,1], linestyle="--")
@@ -2173,269 +2304,281 @@ def main(rolling_train_length=2100,
     plt.show()
 
     # e) Histogram of predicted probabilities
-    predicted_porbability_plot = plt.figure(figsize=(6,4))
+    predicted_probability_plot = plt.figure(figsize=(6,4))
     plt.hist(y_pred_proba, bins=20, edgecolor="k")
     plt.xlabel("Predicted probability"); plt.ylabel("Frequency")
     plt.title("Distribution of Predicted Probabilities")
     plt.show()
-    
 
-    ###############################################################################
-    # 4) Plot cumulative portfolio value for each k
-    ###############################################################################
-    
+    # Persist plots to GCS
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    file_prefix = f"{date_str}/{uuid+'__'+ensemble}"
+    save_performance_figure_to_gcs(confusion_matrix_plot, STAGING_BUCKET, f"{file_prefix}_confusion_matrix.png")
+    save_performance_figure_to_gcs(roc_plot, STAGING_BUCKET, f"{file_prefix}_ROC.png")
+    save_performance_figure_to_gcs(precision_recall_plot, STAGING_BUCKET, f"{file_prefix}_precision_recall_plot.png")
+    save_performance_figure_to_gcs(calibration_curve_plot, STAGING_BUCKET, f"{file_prefix}_calibration_curve.png")
+    save_performance_figure_to_gcs(predicted_probability_plot, STAGING_BUCKET, f"{file_prefix}_predicted_probability.png")
 
-    def generate_file_name(config_dict, file_type, extension):
-        """Generate filename with UUID"""
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        return f"{date_str}_{config_dict['UUID']}|{file_type}.{extension}"
 
-    def create_directory(base_path):
-        """Create directory structure with date-based folders"""
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        date_folder = os.path.join(base_path, date_str)
-        os.makedirs(date_folder, exist_ok=True)
-        return date_folder
-
-    def add_filename_column(df, file_path):
-        """Add RunID column based on filename for future joining"""
-        filename = os.path.splitext(os.path.basename(file_path))[0]
-        truncated_filename = '_'.join(filename.split('|')[:-1])
-        df['RunID'] = truncated_filename
-        return df
-
-    def save_summary_df(summary_df, file_path):
-        """Save summary DataFrame with model information"""
-        df = summary_df.copy()
-        df["model"] = "ListFold"
-        df = add_filename_column(df, file_path)
-        df.to_csv(file_path, index=False)
-
-    def save_portfolio_values(df_results, file_path):
-        """Save portfolio values with RunID"""
-        portfolio_values = []
-
-        for k in df_results['k'].unique():
-            df_k = df_results[df_results['k'] == k].copy()
-            df_k = df_k.sort_values('date')
-            df_k['portfolio_value'] = 100 * (1 + df_k['simple_return']).cumprod()
-            portfolio_values.append(df_k[['date', 'k', 'portfolio_value']])
-
-        combined_df = pd.concat(portfolio_values)
-        combined_df = add_filename_column(combined_df, file_path)
-        combined_df.to_csv(file_path, index=False)
-
-    def save_plot(plot_object, file_path):
-        """Save a plot to disk"""
-        plot_object.savefig(file_path)
-        plt.close()
-
-    def save_listfold_results(base_path, summary_df, df_results, performance_fig):
-        """Save all ListFold results using the summary DataFrame format"""
-        # Get configuration from first row of summary_df
-        config = {
-            'UUID': summary_df['UUID'].iloc[0]
-        }
-
-        # Create folder and generate file paths
-        folder_path = create_directory(base_path)
-        file_paths = {
-            "summary": os.path.join(folder_path, generate_file_name(config, "summary_stats", "csv")),
-            "portfolio_values": os.path.join(folder_path, generate_file_name(config, "portfolio_values", "csv")),
-            "performance_plot": os.path.join(folder_path, generate_file_name(config, "performance", "png"))
-        }
-
-        # Save all files
-        save_summary_df(summary_df, file_paths["summary"])
-    #     save_portfolio_values(df_results, file_paths["portfolio_values"])
-        save_plot(performance_fig, file_paths["performance_plot"])
-
-        print(f"Files saved successfully in {folder_path}")
-        return file_paths
-
-    import os
-    import logging
-    from datetime import datetime
+    #########################################################################################
+    # 5. Train a CatBoost meta model on the base models' predictions
+    #########################################################################################
 
     import pandas as pd
-    from google.cloud import storage, bigquery
+    import numpy as np
+    from catboost import CatBoostClassifier
 
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s %(levelname)s %(name)s %(message)s'
+    # a) Collect probability columns for train and test
+    proba_train = {}
+    proba_test  = {}
+    for name, mdl in models.items():
+        proba_train[f"{name}_proba"] = mdl.predict_proba(X_train)[:, 1]
+        proba_test [f"{name}_proba"] = mdl.predict_proba(X_test)[:, 1]
+
+    # b) Convert the scaled numpy arrays back to DataFrames (so we can concat cleanly)
+    X_train_df = pd.DataFrame(X_train).reset_index(drop=True)
+    X_test_df  = pd.DataFrame(X_test).reset_index(drop=True)
+
+    # c) Append the new probability features column‑wise
+    X_train_meta = pd.concat([X_train_df, pd.DataFrame(proba_train)], axis=1)
+    X_test_meta  = pd.concat([X_test_df,  pd.DataFrame(proba_test)],  axis=1)
+
+    print("Meta feature matrix shape:", X_train_meta.shape, "train  |", X_test_meta.shape, "test")
+
+    # -------------------- 5.  Train CatBoost on the expanded set -----
+    meta_cb = CatBoostClassifier(
+        loss_function='Logloss',
+        eval_metric='AUC',
+        random_seed=42,
+        task_type='CPU',            # or "CPU"
+        depth=6,
+        learning_rate=0.02,
+        iterations=3000,
+        l2_leaf_reg=7,
+        # subsample=0.8,
+        bagging_temperature=2,
+        random_strength=1.5,
+        border_count=64,
+        early_stopping_rounds=150,
+        verbose=100                 # periodic logging helps you see convergence
+    )
+    meta_cb.fit(X_train_meta, y_train)
+
+    # -------------------- 6.  Evaluate the stacked model -------------
+    y_pred_proba = meta_cb.predict_proba(X_test_meta)[:, 1]
+    y_pred       = (y_pred_proba >= 0.5).astype(int)
+
+    accuracy  = accuracy_score (y_test, y_pred)
+    precision = precision_score(y_test, y_pred)
+    recall    = recall_score   (y_test, y_pred)
+    f1        = f1_score       (y_test, y_pred)
+    roc_auc   = roc_auc_score  (y_test, y_pred_proba)
+    brier     = brier_score_loss(y_test, y_pred_proba)
+
+    print(f"Accuracy : {accuracy :.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall   : {recall   :.4f}")
+    print(f"F1 score : {f1       :.4f}")
+    print(f"ROC AUC  : {roc_auc  :.4f}")
+    print(f"Brier    : {brier    :.4f}")
+
+    print("Confusion matrix:\n", confusion_matrix(y_test, y_pred))
+
+    ensemble = "Meta CatBoost on base model predictions"
+    metrics_df = sanitize_and_convert_columns(pd.DataFrame([{"accuracy":accuracy, "precision":precision, "recall":recall, "f1":f1, "roc_auc":roc_auc, "brier": brier, "ensemble":ensemble, 'uuid':uuid}]))
+    append_to_bigquery(metrics_df, DESTINATION_DATASET, f'meta_model_metrics_{table_suffix}')
+
+    # -------------------- 6.  Diagnostic plots -----------------------
+    import matplotlib.pyplot as plt
+
+    # a) Confusion‑matrix heat‑map
+    cm = confusion_matrix(y_test, y_pred)
+    confusion_matrix_plot = plt.figure(figsize=(6,4))
+    plt.imshow(cm, interpolation="nearest")
+    plt.title("Confusion Matrix")
+    plt.colorbar()
+    tick = np.arange(2)
+    plt.xticks(tick, ["Negative","Positive"])
+    plt.yticks(tick, ["Negative","Positive"])
+    for i in range(2):
+        for j in range(2):
+            plt.text(j, i, cm[i,j], ha="center", va="center",
+                    color="white" if cm[i,j] > cm.max()/2 else "black")
+    plt.xlabel("Predicted label")
+    plt.ylabel("True label")
+    plt.show()
+
+    # b) ROC curve
+    fpr, tpr, _ = roc_curve(y_test, y_pred_proba)
+    roc_plot = plt.figure(figsize=(6,4))
+    plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.4f}")
+    plt.plot([0,1],[0,1], linestyle="--", label="Chance")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC Curve")
+    plt.legend(); plt.show()
+
+    # c) Precision‑Recall curve
+    prec, rec, _ = precision_recall_curve(y_test, y_pred_proba)
+    precision_recall_plot = plt.figure(figsize=(6,4))
+    plt.plot(rec, prec)
+    plt.xlabel("Recall"); plt.ylabel("Precision"); plt.title("Precision‑Recall Curve")
+    plt.show()
+
+    # d) Calibration curve
+    prob_true, prob_pred = calibration_curve(y_test, y_pred_proba, n_bins=50)
+    calibration_curve_plot = plt.figure(figsize=(6,4))
+    plt.plot(prob_pred, prob_true, marker="o")
+    plt.plot([0,1],[0,1], linestyle="--")
+    plt.xlabel("Mean Predicted Probability")
+    plt.ylabel("Fraction of Positives")
+    plt.title("Calibration Curve")
+    plt.show()
+
+    # e) Histogram of predicted probabilities
+    predicted_probability_plot = plt.figure(figsize=(6,4))
+    plt.hist(y_pred_proba, bins=20, edgecolor="k")
+    plt.xlabel("Predicted probability"); plt.ylabel("Frequency")
+    plt.title("Distribution of Predicted Probabilities")
+    plt.show()
+
+    # Persist plots to GCS
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    file_prefix = f"{date_str}/{uuid+'__'+ensemble}"
+    save_performance_figure_to_gcs(confusion_matrix_plot, STAGING_BUCKET, f"{file_prefix}_confusion_matrix.png")
+    save_performance_figure_to_gcs(roc_plot, STAGING_BUCKET, f"{file_prefix}_ROC.png")
+    save_performance_figure_to_gcs(precision_recall_plot, STAGING_BUCKET, f"{file_prefix}_precision_recall_plot.png")
+    save_performance_figure_to_gcs(calibration_curve_plot, STAGING_BUCKET, f"{file_prefix}_calibration_curve.png")
+    save_performance_figure_to_gcs(predicted_probability_plot, STAGING_BUCKET, f"{file_prefix}_predicted_probability.png")
+
+    ##############################################################################################
+    # 6. Meta Model without base data (just the base model predictions)
+    ##############################################################################################
+
+    # -------------------- 4.  Build meta‐feature sets (probabilities only) ---------
+    import pandas as pd
+
+    # a) Collect probability columns for train and test
+    proba_train = {
+        f"{name}_proba": mdl.predict_proba(X_train)[:, 1]
+        for name, mdl in models.items()
+    }
+    proba_test = {
+        f"{name}_proba": mdl.predict_proba(X_test)[:, 1]
+        for name, mdl in models.items()
+    }
+
+    # b) Turn them into DataFrames
+    X_train_meta = pd.DataFrame(proba_train).reset_index(drop=True)
+    X_test_meta  = pd.DataFrame(proba_test).reset_index(drop=True)
+
+    print("Meta feature matrix shape:",
+        X_train_meta.shape, "train  |", X_test_meta.shape, "test")
+
+    # -------------------- 5.  Train CatBoost on the meta‐features -------------
+    from catboost import CatBoostClassifier
+
+    meta_cb = CatBoostClassifier(
+        loss_function='Logloss',
+        eval_metric='AUC',
+        random_seed=42,
+        task_type='CPU',            # or "CPU"
+        depth=6,
+        learning_rate=0.02,
+        iterations=3000,
+        l2_leaf_reg=7,
+        bagging_temperature=2,
+        random_strength=1.5,
+        border_count=64,
+        early_stopping_rounds=150,
+        verbose=100
     )
 
+    meta_cb.fit(X_train_meta, y_train)
 
+    # -------------------- 6.  Evaluate the stacked model -------------
+    y_pred_proba = meta_cb.predict_proba(X_test_meta)[:, 1]
+    y_pred       = (y_pred_proba >= 0.5).astype(int)
 
+    accuracy  = accuracy_score (y_test, y_pred)
+    precision = precision_score(y_test, y_pred)
+    recall    = recall_score   (y_test, y_pred)
+    f1        = f1_score       (y_test, y_pred)
+    roc_auc   = roc_auc_score  (y_test, y_pred_proba)
+    brier     = brier_score_loss(y_test, y_pred_proba)
 
-    def save_to_gcs(bucket_name: str, file_name: str, content: bytes) -> None:
-        """
-        Save in-memory content (e.g., CSV string, image bytes) to a file in GCS.
+    print(f"Accuracy : {accuracy :.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall   : {recall   :.4f}")
+    print(f"F1 score : {f1       :.4f}")
+    print(f"ROC AUC  : {roc_auc  :.4f}")
+    print(f"Brier    : {brier    :.4f}")
 
-        Parameters
-        ----------
-        bucket_name : str
-            The name of the GCS bucket (with or without "gs://").
-        file_name : str
-            The destination file path in the bucket.
-        content : bytes
-            The data to upload.
-        """
-        bucket_name_clean = bucket_name.replace("gs://", "")
-        bucket = storage_client.bucket(bucket_name_clean)
-        blob = bucket.blob(file_name)
+    print("Confusion matrix:\n", confusion_matrix(y_test, y_pred))
 
-        if isinstance(content, str):
-            content = content.encode('utf-8')  # Convert to bytes if necessary
+    ensemble = "Meta CatBoost with base data"
+    metrics_df = sanitize_and_convert_columns(pd.DataFrame([{"accuracy":accuracy, "precision":precision, "recall":recall, "f1":f1, "roc_auc":roc_auc, "brier": brier, "ensemble":ensemble, 'uuid':uuid}]))
+    append_to_bigquery(metrics_df, DESTINATION_DATASET, f'meta_model_metrics_{table_suffix}')
 
-        blob.upload_from_string(content)
-        logging.info(f"File {file_name} saved to {bucket_name_clean}.")
+    # -------------------- 6.  Diagnostic plots -----------------------
+    import matplotlib.pyplot as plt
 
+    # a) Confusion‑matrix heat‑map
+    cm = confusion_matrix(y_test, y_pred)
+    confusion_matrix_plot = plt.figure(figsize=(6,4))
+    plt.imshow(cm, interpolation="nearest")
+    plt.title("Confusion Matrix")
+    plt.colorbar()
+    tick = np.arange(2)
+    plt.xticks(tick, ["Negative","Positive"])
+    plt.yticks(tick, ["Negative","Positive"])
+    for i in range(2):
+        for j in range(2):
+            plt.text(j, i, cm[i,j], ha="center", va="center",
+                    color="white" if cm[i,j] > cm.max()/2 else "black")
+    plt.xlabel("Predicted label")
+    plt.ylabel("True label")
+    plt.show()
 
-    # =============================================================================
-    # MAIN SAVE FUNCTION
-    # =============================================================================
+    # b) ROC curve
+    fpr, tpr, _ = roc_curve(y_test, y_pred_proba)
+    roc_plot = plt.figure(figsize=(6,4))
+    plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.4f}")
+    plt.plot([0,1],[0,1], linestyle="--", label="Chance")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC Curve")
+    plt.legend(); plt.show()
 
-    def save_listfold_results_to_gcs_and_bigquery(
-        base_path: str,
-        summary_df: pd.DataFrame,
-        df_results: pd.DataFrame,
-        bq_pred_df: pd.DataFrame,
-        data_metrics_df: pd.DataFrame,
-        performance_fig
-    ) -> None:
-        """
-        Save DataFrames (summary_df, df_results, bq_pred_df) and performance figure
-        to both GCS and BigQuery.
-        """
-        # Prepare paths and file names
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        if "uuid" not in summary_df.columns:
-            raise ValueError("summary_df must contain a column named 'uuid'.")
+    # c) Precision‑Recall curve
+    prec, rec, _ = precision_recall_curve(y_test, y_pred_proba)
+    precision_recall_plot = plt.figure(figsize=(6,4))
+    plt.plot(rec, prec)
+    plt.xlabel("Recall"); plt.ylabel("Precision"); plt.title("Precision‑Recall Curve")
+    plt.show()
 
-        unique_id = summary_df['uuid'].iloc[0]
-        file_prefix = f"{date_str}/{unique_id}"
+    # d) Calibration curve
+    prob_true, prob_pred = calibration_curve(y_test, y_pred_proba, n_bins=50)
+    calibration_curve_plot = plt.figure(figsize=(6,4))
+    plt.plot(prob_pred, prob_true, marker="o")
+    plt.plot([0,1],[0,1], linestyle="--")
+    plt.xlabel("Mean Predicted Probability")
+    plt.ylabel("Fraction of Positives")
+    plt.title("Calibration Curve")
+    plt.show()
 
-        # CSV filenames
-        summary_file_name = f"{file_prefix}_summary_stats.csv"
-        portfolio_file_name = f"{file_prefix}_portfolio_values.csv"
-        predictions_file_name = f"{file_prefix}_predictions.csv"
-        performance_plot_name = f"{file_prefix}_performance.png"
+    # e) Histogram of predicted probabilities
+    predicted_probability_plot = plt.figure(figsize=(6,4))
+    plt.hist(y_pred_proba, bins=20, edgecolor="k")
+    plt.xlabel("Predicted probability"); plt.ylabel("Frequency")
+    plt.title("Distribution of Predicted Probabilities")
+    plt.show()
 
-        # -------------------------------------------------------------------------
-        # Save CSV files to GCS
-        # -------------------------------------------------------------------------
-        # 1. summary_df
-        summary_csv = summary_df.to_csv(index=False)
-        save_to_gcs(STAGING_BUCKET, summary_file_name, summary_csv)
-
-        # 2. df_results
-        results_csv = df_results.to_csv(index=False)
-        save_to_gcs(STAGING_BUCKET, portfolio_file_name, results_csv)
-
-        # 3. bq_pred_df
-        pred_csv = bq_pred_df.to_csv(index=False)
-        save_to_gcs(STAGING_BUCKET, predictions_file_name, pred_csv)
-
-        # -------------------------------------------------------------------------
-        # Save performance figure to GCS
-        # -------------------------------------------------------------------------
-        save_performance_figure_to_gcs(performance_fig, STAGING_BUCKET, performance_plot_name)
-
-        # -------------------------------------------------------------------------
-        # Append DataFrames to BigQuery
-        # -------------------------------------------------------------------------
-        # NOTE: Update table names as needed.
-        try:
-            append_to_bigquery(summary_df, DESTINATION_DATASET, f"test_summary_table_{table_suffix}")
-
-            logging.info("All data appended to BigQuery successfully.")
-        except Exception as e:
-            logging.error(f"Error during BigQuery appends: {str(e)}")
-            # Depending on your use case, decide whether to raise or continue
-            raise
-
-        try:
-            append_to_bigquery(df_results, DESTINATION_DATASET, f"test_results_table_{table_suffix}")
-
-            logging.info("All data appended to BigQuery successfully.")
-        except Exception as e:
-            logging.error(f"Error during BigQuery appends: {str(e)}")
-            # Depending on your use case, decide whether to raise or continue
-            raise
-
-        try:
-            append_to_bigquery(bq_pred_df, DESTINATION_DATASET, f"test_predictions_table_{table_suffix}")
-
-            logging.info("All data appended to BigQuery successfully.")
-        except Exception as e:
-            logging.error(f"Error during BigQuery appends: {str(e)}")
-            # Depending on your use case, decide whether to raise or continue
-            raise
-
-
-        try:
-            append_to_bigquery(data_metrics_df, DESTINATION_DATASET, f"test_data_metrics_{table_suffix}")
-
-            logging.info("All data appended to BigQuery successfully.")
-        except Exception as e:
-            logging.error(f"Error during BigQuery appends: {str(e)}")
-            # Depending on your use case, decide whether to raise or continue
-            raise
-
-        logging.info("Files saved to GCS and data appended to BigQuery successfully.")
-
-    def save_performance_figure_to_gcs(performance_fig, staging_bucket, performance_plot_name):
-        """
-        Save a Matplotlib figure directly to GCS using an in-memory buffer.
-        """
-        # Create an in-memory bytes buffer
-        buffer = io.BytesIO()
-
-        # Save the figure to the buffer in PNG format
-        performance_fig.savefig(buffer, format='png')
-        buffer.seek(0)  # Move to the beginning of the buffer
-
-        # Read the bytes from the buffer
-        plot_content = buffer.getvalue()
-
-        # Upload to GCS
-        save_to_gcs(staging_bucket, performance_plot_name, plot_content)
-
-        # Close the buffer
-        buffer.close()
-
-    # =============================================================================
-    # EXAMPLE USAGE
-    # =============================================================================
-
-    # 1. Sanitize DataFrames
-    summary_df = sanitize_and_convert_columns(summary_df)
-    df_results = sanitize_and_convert_columns(df_results)
-    bq_pred_df = sanitize_and_convert_columns(bq_pred_df)
-    data_metrics_df = compute_nn_data_quality_metrics(df_long, lookback=n_features * rolling_train_length)
-
-
-    # 2. Add UUID columns
-    df_results["uuid"] = summary_df.uuid.unique()[0]
-    bq_pred_df["uuid"] = summary_df.uuid.unique()[0]
-    data_metrics_df['uuid'] = summary_df.uuid.unique()[0]
-    # summary_df["uuid"] = datetime.now().strftime("%Y-%m-%d-%Hh-%Mm_")+summary_df.uuid.unique()[0]
-
-
-    # 2.1 Add Dates
-    df_results["run_date"] = datetime.now()
-    bq_pred_df["run_date"] = datetime.now()
-    summary_df["run_date"] = datetime.now()
-    data_metrics_df["run_date"] = datetime.now()
-
-    # # 3. Save
-    save_listfold_results_to_gcs_and_bigquery(
-        base_path="Rank Optimized Portfolio Selection_test",
-        summary_df=summary_df,
-        df_results=df_results,
-        bq_pred_df=bq_pred_df,
-        data_metrics_df=data_metrics_df,
-        performance_fig=performance_fig
-    )
+    # Persist plots to GCS
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    file_prefix = f"{date_str}/{uuid+'__'+ensemble}"
+    save_performance_figure_to_gcs(confusion_matrix_plot, STAGING_BUCKET, f"{file_prefix}_confusion_matrix.png")
+    save_performance_figure_to_gcs(roc_plot, STAGING_BUCKET, f"{file_prefix}_ROC.png")
+    save_performance_figure_to_gcs(precision_recall_plot, STAGING_BUCKET, f"{file_prefix}_precision_recall_plot.png")
+    save_performance_figure_to_gcs(calibration_curve_plot, STAGING_BUCKET, f"{file_prefix}_calibration_curve.png")
+    save_performance_figure_to_gcs(predicted_probability_plot, STAGING_BUCKET, f"{file_prefix}_predicted_probability.png")
