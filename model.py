@@ -2253,6 +2253,7 @@ def main(rolling_train_length=2100,
 
     ensemble = "simple average"
     metrics_df = sanitize_and_convert_columns(pd.DataFrame([{"accuracy":accuracy, "precision":precision, "recall":recall, "f1":f1, "roc_auc":roc_auc, "brier": brier, "ensemble":ensemble, 'uuid':uuid}]))
+    print(metrics_df)
     append_to_bigquery(metrics_df, DESTINATION_DATASET, f'meta_model_metrics_{table_suffix}')
 
     # -------------------- 6.  Diagnostic plots -----------------------
@@ -2384,8 +2385,9 @@ def main(rolling_train_length=2100,
 
     print("Confusion matrix:\n", confusion_matrix(y_test, y_pred))
 
-    ensemble = "Meta CatBoost on base model predictions"
+    ensemble = "Meta CatBoost with base models and original data"
     metrics_df = sanitize_and_convert_columns(pd.DataFrame([{"accuracy":accuracy, "precision":precision, "recall":recall, "f1":f1, "roc_auc":roc_auc, "brier": brier, "ensemble":ensemble, 'uuid':uuid}]))
+    print(metrics_df)
     append_to_bigquery(metrics_df, DESTINATION_DATASET, f'meta_model_metrics_{table_suffix}')
 
     # -------------------- 6.  Diagnostic plots -----------------------
@@ -2516,7 +2518,8 @@ def main(rolling_train_length=2100,
 
     print("Confusion matrix:\n", confusion_matrix(y_test, y_pred))
 
-    ensemble = "Meta CatBoost with base data"
+    ensemble = "Meta CatBoost without base data"
+    print(metrics_df)
     metrics_df = sanitize_and_convert_columns(pd.DataFrame([{"accuracy":accuracy, "precision":precision, "recall":recall, "f1":f1, "roc_auc":roc_auc, "brier": brier, "ensemble":ensemble, 'uuid':uuid}]))
     append_to_bigquery(metrics_df, DESTINATION_DATASET, f'meta_model_metrics_{table_suffix}')
 
