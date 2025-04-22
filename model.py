@@ -10,17 +10,17 @@ def main(rolling_train_length=2100,
         include_fundamentals=0,
         include_will_features=0,
         notes="no notes",
-        epochs=3000,
+        # epochs=3000,
         addition_technical=0,
         additional_factors=2,
-        act_func="swish",
-        table_suffix="V023_test",
+        # act_func="swish",
+        table_suffix="V001_testing",
         use_correlations=0,
         will_portfolios=0,
-        calculate_shap=1,
-        calculate_ww=1,
-        clamp_gradients=1,
-        custom_tie_breaks=0,
+        # calculate_shap=1,
+        # calculate_ww=1,
+        # clamp_gradients=1,
+        # custom_tie_breaks=0,
         will_predictions=0,
         include_coint_regimes=0,
         include_cluster_data=0,
@@ -32,7 +32,9 @@ def main(rolling_train_length=2100,
         live_next_day=0,
         is_test=0,
         cluster_df=0,
-        return_lag=1
+        return_lag=1,
+        core_model_column="long_return",
+
 ):
     args = locals().copy()
     args.pop("cluster_df")
@@ -45,12 +47,6 @@ def main(rolling_train_length=2100,
         if key in args:
             args.pop(key)
 
-    print("The current type of cluster_df",  type(cluster_df))
-    if (live_next_day == 1) and (type(cluster_df) == int):
-        print("\n\n\n!!!!!ERROR!!!!!!!!!: \n The incoming portfolio returns in the `cluster_data` variable is not a DataFrame. \nPlease check the input data and try again.\n\n\n")
-        raise ValueError(f"Incoming portfolio returns in the `cluster_data` variable is not a DataFrame. Please check the input data and try again.")
-        return(None)
-
     YIELDS_TABLE = "issachar-feature-library.core_raw.factor_yields"
     INDEX_RETURNS_TABLE = "josh-risk.IssacharReporting.Index_Returns"
     PORTFOLIO_FRESHNESS = 5
@@ -60,11 +56,7 @@ def main(rolling_train_length=2100,
     import pandas as pd
     import numpy as np
     from sklearn.model_selection import train_test_split
-    import seaborn as sns
     import matplotlib.pyplot as plt
-    import torch
-    from sklearn.preprocessing import MinMaxScaler
-    import copy
     from datetime import datetime
     import os
     import io
@@ -73,11 +65,6 @@ def main(rolling_train_length=2100,
     from sklearn.metrics import r2_score
     from sklearn.preprocessing import MinMaxScaler
     import time
-    import torch
-    import torch.nn as nn
-    import torch.nn.functional as F
-    import torch.optim as optim
-    from torch.amp import autocast, GradScaler
     import shap
     import weightwatcher as ww
     from scipy.stats import skew, kurtosis
@@ -85,9 +72,9 @@ def main(rolling_train_length=2100,
     import subprocess
     import pytz
     from datetime import datetime, timedelta
-    from tabulate import tabulate
 
     holdout_start = pd.to_datetime(holdout_start)
+    uuid = str(pd.Timestamp.now()) + "__model=Meta_Model__" + "__".join(f"{key}={value}" for key, value in args.items())
 
     # Google Cloud imports
     from google.cloud import bigquery, storage
@@ -113,12 +100,6 @@ def main(rolling_train_length=2100,
     def set_random_seeds(seed=42):
         random.seed(seed)
         np.random.seed(seed)
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(seed)
-            torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
 
     set_random_seeds(random_seed)
 
@@ -168,63 +149,72 @@ def main(rolling_train_length=2100,
         df_port = df_port[subset]
         df_port.index = df_port.index.tz_localize(None)
 
+
+    ##########################################################################
+    # 2. Update with the core model predictions
+    ##########################################################################
+
+    test = pd.read_csv("risk_data (16).csv")
+    test['date'] = pd.to_datetime(test['date'])
+    test = test.sort_values('date', ascending=True)
+    # test = test[test['date'] > "2007-01-01"]
+    test['portfolio_id'] = 'core_model'
+    test['core_model'] = test[core_model_column] / 100 # total_return
+    # test = test.set_index("date")
+    df_port = test[['core_model', 'date']]
+
+
+    ##########################################################################
+    # 3. Feature Engineering
+    ##########################################################################
+
     # Identifies if the table has been updated in the last 20 minutes
     def check_table_freshness(table_name, freshness_minutes=20):
         # Get the table reference
         table_ref = client.get_table(table_name)
         last_modified = table_ref.modified
-        
+
         # Convert to datetime if it's not already
         if not isinstance(last_modified, datetime):
             last_modified = datetime.fromisoformat(last_modified.isoformat())
-        
+
         # Check if the table was modified within the freshness window
         current_time = datetime.now(pytz.UTC)
         freshness_threshold = current_time - timedelta(minutes=freshness_minutes)
-        
+
         # Optional: Log the comparison values for debugging
         print(f"Last modified {table_name}: {last_modified}")
         print(f"Freshness threshold: {freshness_threshold}")
         print(f"Staleness: {((current_time - last_modified).seconds / 60):.2f} minutes")
-        
+
         if last_modified < freshness_threshold:
             raise ValueError(f"Table {table_name} was last updated at {last_modified}, which is more than {freshness_minutes} minutes ago.")
-        
+
         # If no error is raised, return True to indicate the table is fresh
         return True
-    
+
     # Read in the factor returns
     factor_query = f'''
-                    SELECT 
+                    SELECT
                         mfr.date,
-                        mfr.* EXCEPT (date), 
-                        mfa.* EXCEPT (date)  
-                    FROM 
+                        mfr.* EXCEPT (date),
+                        mfa.* EXCEPT (date)
+                    FROM
                         `{INDEX_RETURNS_TABLE}` mfr
-                    LEFT OUTER JOIN 
-                        (SELECT 
+                    LEFT OUTER JOIN
+                        (SELECT
                             PARSE_DATE('%m/%d/%Y', date) AS date,
                             * EXCEPT (date, `20yr_sp_fairvalue`)
-                        FROM 
+                        FROM
                             `{YIELDS_TABLE}`) mfa
-                    ON 
+                    ON
                         mfr.date = mfa.date
-                    ORDER BY 
+                    ORDER BY
                         mfr.date DESC
             '''
-    
-    if live_next_day == 1:
-        if is_test == 0:
-            check_table_freshness(INDEX_RETURNS_TABLE, freshness_minutes=FACTOR_FRESHNESS)
-            check_table_freshness(YIELDS_TABLE, freshness_minutes=FACTOR_FRESHNESS)
-            # TODO: Add date check here
-            if len(cluster_dates.apply(lambda x: x.tz_convert('US/Eastern').date()).unique()) > 1:
-                raise ValueError(f"Multiple dates detected in the portfolio data. Please ensure only one date is present.")
-            if ((pd.Timestamp.today().tz_localize('UTC') - cluster_dates.max()).total_seconds() / 60) > PORTFOLIO_FRESHNESS:
-                raise ValueError(f"Portfolio data is stale. Please ensure the data is updated.")
 
     df_factors = read_table_to_dataframe(bigquery.Client(project="issachar-feature-library"), "issachar-feature-library.qjg.macro_factor_returns", factor_query).fillna(0)
-    
+
     # Subset to core set of 19 factors or no factors if configured to do so
     if additional_factors == 1:
         subset = ['date',
@@ -263,14 +253,6 @@ def main(rolling_train_length=2100,
     df = df.reset_index()
     portfolio_cols = df_port.columns
     id_vars = ['date'] # Set up for melt
-
-    # GPU check
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Using device:", device)
-    print("CUDA available:", torch.cuda.is_available())
-    print("Device count:", torch.cuda.device_count())
-    print("Current device:", torch.cuda.current_device())
-    print("Device name:", torch.cuda.get_device_name(0))
 
     # TODO: Update to Dask to use all 16 cores
     feature_gen_start = time.time()
@@ -447,9 +429,9 @@ def main(rolling_train_length=2100,
             lambda x: (1 + x).cumprod() - 1
         )
         return pd.DataFrame({'lag1_cumulative_return': cum_ret})
-    
+
     # No leakage
-    # TODO: Update to use adjust=True 
+    # TODO: Update to use adjust=True
     def calculate_ema(df_long, span=20):
         """
         Calculate EMA using lag1 price for each portfolio group
@@ -748,7 +730,7 @@ def main(rolling_train_length=2100,
         return pd.DataFrame(features)
 
     # No leakage
-    # NOTE: Global index. Do not like how ewm stands for exponential moving window. The acronym is wrong. 
+    # NOTE: Global index. Do not like how ewm stands for exponential moving window. The acronym is wrong.
     def calculate_ema_distances(df_long, spans=[10,15,21,63,100,200]):
         """
         Calculate distances from EMAs and EMA crossovers using lag1 price for each portfolio group
@@ -1046,88 +1028,88 @@ def main(rolling_train_length=2100,
         """
         if portfolios is None:
             portfolios = df_long['portfolio_id'].unique()
-        
+
         # Create an empty DataFrame to store results
         lead_lag_features = pd.DataFrame(index=df_long.index)
-        
+
         # Sort data by date and portfolio
         df_long = df_long.sort_values(['date', 'portfolio_id']).copy()
-        
+
         # Create a pivot table of returns with date as index and portfolio_id as columns
         pivot_returns = df_long.pivot(index='date', columns='portfolio_id', values='lag1_returns')
-        
+
         # For each portfolio pair
         for i, port_a in enumerate(portfolios):
             for port_b in portfolios:
                 # Skip self-correlations if desired
                 if port_a == port_b:
                     continue
-                    
+
                 # Get the return series for both portfolios
                 returns_a = pivot_returns[port_a]
                 returns_b = pivot_returns[port_b]
-                
+
                 # For each lag period
                 for lag in lags:
                     # Calculate A(t) leading B(t+lag)
                     a_leads_b = returns_a.shift(lag).to_frame().join(returns_b, how='inner')
                     a_leads_b.columns = ['a_lead', 'b']
-                    
+
                     # Calculate B(t) leading A(t+lag)
                     b_leads_a = returns_b.shift(lag).to_frame().join(returns_a, how='inner')
                     b_leads_a.columns = ['b_lead', 'a']
-                    
+
                     # Calculate rolling correlations for each window size
                     for window in windows:
                         # A leads B: corr(A(t-lag), B(t))
                         a_leads_b_corr = a_leads_b['a_lead'].rolling(window).corr(a_leads_b['b'])
                         a_leads_b_corr_name = f'lag{lag}_corr_{port_a}_leads_{port_b}_{window}d'
-                        
+
                         # B leads A: corr(B(t-lag), A(t))
                         b_leads_a_corr = b_leads_a['b_lead'].rolling(window).corr(b_leads_a['a'])
                         b_leads_a_corr_name = f'lag{lag}_corr_{port_b}_leads_{port_a}_{window}d'
-                        
+
                         # Store correlation series with their timestamps
                         lead_lag_df = pd.DataFrame({
                             a_leads_b_corr_name: a_leads_b_corr,
                             b_leads_a_corr_name: b_leads_a_corr
                         })
-                        
+
                         # Calculate correlation differential (which portfolio has stronger predictive power)
                         diff_name = f'lag{lag}_corr_diff_{port_a}_{port_b}_{window}d'
                         lead_lag_df[diff_name] = a_leads_b_corr - b_leads_a_corr
-                        
+
                         # Calculate correlation sign stability
                         sign_stability_a_leads = lead_lag_df[a_leads_b_corr_name].rolling(window//2).apply(
                             lambda x: np.abs(np.sign(x).mean()), raw=True
                         )
                         lead_lag_df[f'{a_leads_b_corr_name}_sign_stability'] = sign_stability_a_leads
-                        
+
                         sign_stability_b_leads = lead_lag_df[b_leads_a_corr_name].rolling(window//2).apply(
                             lambda x: np.abs(np.sign(x).mean()), raw=True
                         )
                         lead_lag_df[f'{b_leads_a_corr_name}_sign_stability'] = sign_stability_b_leads
-                        
+
                         # Merge with main features DataFrame
                         lead_lag_df = lead_lag_df.reset_index()
-                        
+
                         # Map the correlations back to the original long-format data
                         for feature_name in lead_lag_df.columns:
                             if feature_name != 'date':
                                 # Create a mapping of date -> correlation value
                                 date_to_corr = dict(zip(lead_lag_df['date'], lead_lag_df[feature_name]))
-                                
+
                                 # Add the correlation as a feature to all rows with portfolio_id == port_a
                                 mask_a = df_long['portfolio_id'] == port_a
                                 lead_lag_features.loc[mask_a, feature_name] = df_long.loc[mask_a, 'date'].map(date_to_corr)
-                                
+
                                 # If we want both portfolios to see this feature
                                 mask_b = df_long['portfolio_id'] == port_b
                                 lead_lag_features.loc[mask_b, feature_name] = df_long.loc[mask_b, 'date'].map(date_to_corr)
-        
+
         # Fill NaN values with 0 (or another appropriate strategy)
         lead_lag_features = lead_lag_features.fillna(0)
-        
+
         return lead_lag_features
 
     #####################################################################
@@ -1176,17 +1158,17 @@ def main(rolling_train_length=2100,
 
     # Join economic factors
     df_long = df_long.join(df_factors.shift(factor_lag).add_prefix(f'fact_lag{factor_lag}_'), on="date")
-    
+
     # Factorize date for use in LearnToRank models if needed
     df_long["qid"] = pd.factorize(df_long["date"])[0]
 
     # Sort by date and portfolio_id
     df_long = df_long.sort_values(by=['date']).reset_index(drop=True)
-    
+
     # Log-transform returnsall columns with "returns" in the name
     return_cols = [x for x in df_long.columns if "returns" in x]
     df_long[return_cols] = np.log(df_long[return_cols]+1)
-    
+
     # Sort by date and portfolio_id
     df_long = df_long.sort_values(["date", "portfolio_id"]).reset_index(drop=True)
 
@@ -1217,10 +1199,10 @@ def main(rolling_train_length=2100,
         df_long['month_cos'] = np.cos(2 * np.pi * df_long['month'] / 12)
 
 
-    # TODO: Add logic to turning cross-asset on/off 
+    # TODO: Add logic to turning cross-asset on/off
     # NOTE: Previous tests added ~1.5K new columns with 19 portfolios and degraded performance. Revisit with better approach.
     # cross_asset_features = calculate_cross_asset_dynamics(
-    #     df_long, 
+    #     df_long,
     #     portfolios=list(df_long['portfolio_id'].unique()),  # Limit to first 5 portfolios to manage feature count
     #     lags=[5],
     #     windows=[63]
@@ -1236,7 +1218,7 @@ def main(rolling_train_length=2100,
     start_date  = "2004-01-01"
     end_date    = "2025-01-17"
 
-    # TODO: Deprecate this 
+    # TODO: Deprecate this
     def get_features(start_date, end_date, feature_table):
         query = f"""
         SELECT
@@ -1280,7 +1262,7 @@ def main(rolling_train_length=2100,
                 .merge(lib_v1_features, on=['date', 'portfolio_id'], how='left')
                 )
     # end deprecate this
-    
+
     # TODO: Deprecate this
     if include_cluster_data == 1:
         query = '''
@@ -1474,8 +1456,8 @@ def main(rolling_train_length=2100,
     if will_predictions == 1:
         # Regular IC direction prediction
         query = '''
-        SELECT date, signal as portfolio_id, prediction as ic_direction_pred1 FROM `issachar-feature-library.wmg.ic_direction_pred1` 
-        WHERE prediction_made = 1 
+        SELECT date, signal as portfolio_id, prediction as ic_direction_pred1 FROM `issachar-feature-library.wmg.ic_direction_pred1`
+        WHERE prediction_made = 1
         ORDER BY DATE asc
             '''
 
@@ -1489,8 +1471,8 @@ def main(rolling_train_length=2100,
 
         # IC direction prediction with Z-score update
         query = '''
-        SELECT date, signal as portfolio_id, prediction as ic_direction_pred2 FROM `issachar-feature-library.wmg.ic_direction_pred2` 
-        WHERE prediction_made = 1 
+        SELECT date, signal as portfolio_id, prediction as ic_direction_pred2 FROM `issachar-feature-library.wmg.ic_direction_pred2`
+        WHERE prediction_made = 1
         ORDER BY DATE asc
             '''
         query_job = client.query(query)
@@ -1500,26 +1482,97 @@ def main(rolling_train_length=2100,
         df_long = df_long.merge(ic_pred1_df, on=['date', 'portfolio_id'], how='left')
         df_long = df_long.merge(ic_pred2_df, on=['date', 'portfolio_id'], how='left')
 
+    # def calculate_rolling_correlation(df_long, col1, col2, windows):
+    #     """
+    #     Calculate rolling correlation between two columns of the input DataFrame,
+    #     grouped by 'portfolio_id', for multiple rolling window sizes.
+    #     """
+    #     features = {}
+
+    #     for window in windows:
+    #         # Compute the rolling correlation for each portfolio group
+    #         rolling_corr_series = df_long.groupby('portfolio_id').apply(
+    #             lambda group: group[col1].rolling(window, min_periods=window).corr(group[col2])
+    #         )
+    #         # Reset the multi-index (created by groupby.apply) so that it aligns with the original DataFrame
+    #         rolling_corr_series = rolling_corr_series.reset_index(level=0, drop=True)
+    #         # Define the output column name
+    #         col_name = f'rolling_corr_{col1}_{col2}_{window}'
+    #         features[col_name] = rolling_corr_series
+
+    #         print(features)
+    #         print(type(features))
+    #         print(features[col_name])
+    #         print(type(features[col_name]))
+    #     return pd.DataFrame(features)
+
     def calculate_rolling_correlation(df_long, col1, col2, windows):
         """
         Calculate rolling correlation between two columns of the input DataFrame,
         grouped by 'portfolio_id', for multiple rolling window sizes.
         """
-        features = {}
-        
-        for window in windows:
-            # Compute the rolling correlation for each portfolio group
-            rolling_corr_series = df_long.groupby('portfolio_id').apply(
-                lambda group: group[col1].rolling(window, min_periods=window).corr(group[col2])
-            )
-            # Reset the multi-index (created by groupby.apply) so that it aligns with the original DataFrame
-            rolling_corr_series = rolling_corr_series.reset_index(level=0, drop=True)
-            # Define the output column name
-            col_name = f'rolling_corr_{col1}_{col2}_{window}'
-            features[col_name] = rolling_corr_series
+        # Create an empty DataFrame with the same index as df_long
+        result_df = pd.DataFrame(index=df_long.index)
 
-        return pd.DataFrame(features)
-    
+        for window in windows:
+            # Create a temporary column name for the rolling correlation
+            col_name = f'rolling_corr_{col1}_{col2}_{window}'
+
+            # Initialize an empty Series with the same index as df_long
+            rolling_corr = pd.Series(index=df_long.index, dtype=float)
+
+            # Calculate rolling correlation for each portfolio separately
+            for portfolio_id, group in df_long.groupby('portfolio_id'):
+                # Calculate rolling correlation for this group
+                group_corr = group[col1].rolling(window, min_periods=window).corr(group[col2])
+
+                # Assign the correlation values to the corresponding indices in the full series
+                rolling_corr.loc[group.index] = group_corr
+
+            # Add the correlation series as a new column to the result DataFrame
+            result_df[col_name] = rolling_corr
+
+        return result_df
+
+    # def calculate_rolling_corr_diffs(df_long, col1, col2, windows):
+    #     """
+    #     Calculate rolling correlations between two columns (col1 and col2) for multiple window lengths,
+    #     along with:
+    #     - Day-to-day differences of each rolling correlation.
+    #     - Cross-window differences between the rolling correlations.
+    #     """
+    #     features = {}
+    #     corr_store = {}
+
+    #     # 1. Compute rolling correlations and their day-to-day differences for each window.
+    #     for window in windows:
+    #         # Compute rolling correlation per portfolio group.
+    #         rolling_corr_series = df_long.groupby('portfolio_id').apply(
+    #             lambda group: group[col1].rolling(window, min_periods=window).corr(group[col2])
+    #         )
+    #         # Reset the multi-index to align with the original DataFrame.
+    #         rolling_corr_series = rolling_corr_series.reset_index(level=0, drop=True)
+    #         col_name = f'rolling_corr_{col1}_{col2}_{window}'
+    #         features[col_name] = rolling_corr_series
+    #         # Store for later cross-window diff calculation.
+    #         corr_store[window] = rolling_corr_series
+    #         # Day-to-day difference of this rolling correlation.
+    #         features[f'{col_name}_diff'] = rolling_corr_series.groupby(df_long['portfolio_id']).diff()
+
+    #     # 2. Compute cross-window differences: for each pair of windows, subtract the corresponding correlations.
+    #     for i, w1 in enumerate(windows):
+    #         for w2 in windows[i+1:]:
+    #             diff_name = f'rolling_corr_diff_{col1}_{col2}_{w1}_{w2}'
+    #             features[diff_name] = (corr_store[w1] - corr_store[w2])
+
+
+    #     # print(features)
+    #     # print(type(features))
+    #     # print(features['rolling_corr_diff_fact_lag1_short_momentum_fact_lag1_long_momentum_63_126'])
+    #     # print(type(features['rolling_corr_diff_fact_lag1_short_momentum_fact_lag1_long_momentum_63_126']))
+    #     print(col1, col2)
+    #     return pd.DataFrame(features)
+
     def calculate_rolling_corr_diffs(df_long, col1, col2, windows):
         """
         Calculate rolling correlations between two columns (col1 and col2) for multiple window lengths,
@@ -1527,31 +1580,110 @@ def main(rolling_train_length=2100,
         - Day-to-day differences of each rolling correlation.
         - Cross-window differences between the rolling correlations.
         """
-        features = {}
+        # Create an empty DataFrame with the same index as df_long
+        result_df = pd.DataFrame(index=df_long.index)
         corr_store = {}
 
         # 1. Compute rolling correlations and their day-to-day differences for each window.
         for window in windows:
-            # Compute rolling correlation per portfolio group.
-            rolling_corr_series = df_long.groupby('portfolio_id').apply(
-                lambda group: group[col1].rolling(window, min_periods=window).corr(group[col2])
-            )
-            # Reset the multi-index to align with the original DataFrame.
-            rolling_corr_series = rolling_corr_series.reset_index(level=0, drop=True)
+            # Initialize an empty Series with the same index as df_long
+            rolling_corr = pd.Series(index=df_long.index, dtype=float)
+
+            # Calculate rolling correlation for each portfolio separately
+            for portfolio_id, group in df_long.groupby('portfolio_id'):
+                # Calculate rolling correlation for this group
+                group_corr = group[col1].rolling(window, min_periods=window).corr(group[col2])
+
+                # Assign the correlation values to the corresponding indices in the full series
+                rolling_corr.loc[group.index] = group_corr
+
+            # Define column name and add to result DataFrame
             col_name = f'rolling_corr_{col1}_{col2}_{window}'
-            features[col_name] = rolling_corr_series
-            # Store for later cross-window diff calculation.
-            corr_store[window] = rolling_corr_series
-            # Day-to-day difference of this rolling correlation.
-            features[f'{col_name}_diff'] = rolling_corr_series.groupby(df_long['portfolio_id']).diff()
+            result_df[col_name] = rolling_corr
+
+            # Store for later cross-window diff calculation
+            corr_store[window] = rolling_corr
+
+            # Day-to-day difference of this rolling correlation
+            # We need to group by portfolio_id to avoid calculating differences across different portfolios
+            day_diff = pd.Series(index=df_long.index, dtype=float)
+            for portfolio_id, group in df_long.groupby('portfolio_id'):
+                portfolio_indices = group.index
+                portfolio_corr = rolling_corr.loc[portfolio_indices]
+                day_diff.loc[portfolio_indices] = portfolio_corr.diff()
+
+            result_df[f'{col_name}_diff'] = day_diff
 
         # 2. Compute cross-window differences: for each pair of windows, subtract the corresponding correlations.
         for i, w1 in enumerate(windows):
             for w2 in windows[i+1:]:
                 diff_name = f'rolling_corr_diff_{col1}_{col2}_{w1}_{w2}'
-                features[diff_name] = corr_store[w1] - corr_store[w2]
+                result_df[diff_name] = corr_store[w1] - corr_store[w2]
 
-        return pd.DataFrame(features)
+        print(col1, col2)
+        return result_df
+
+    # def calculate_rolling_corr_diffs_with_rsi_vol(df_long, col1, col2, windows,
+    #                                             rsi_windows=[14, 21, 30, 50],
+    #                                             vol_window=20):
+    #     """
+    #     Calculate rolling correlations between two columns (col1 and col2) for multiple window lengths,
+    #     along with:
+    #     - Day-to-day differences for each rolling correlation.
+    #     - Cross-window differences between the rolling correlations.
+    #     - RSI values for each correlation series (using specified RSI windows).
+    #     - Rolling volatility (standard deviation) for each correlation series.
+    #     """
+    #     features = {}
+    #     corr_store = {}
+
+    #     # Helper: Compute RSI for a given series and window.
+    #     def _compute_rsi(series, window):
+    #         delta = series.diff()
+    #         gain = delta.where(delta > 0, 0).rolling(window, min_periods=window).mean()
+    #         loss = -delta.where(delta < 0, 0).rolling(window, min_periods=window).mean()
+    #         rs = gain / loss
+    #         rsi = 100 - (100.0 / (1.0 + rs))
+    #         return rsi
+
+    #     # 1. Compute rolling correlations and their day-to-day differences for each window.
+    #     for window in windows:
+    #         # Compute rolling correlation for each portfolio.
+    #         rolling_corr_series = df_long.groupby('portfolio_id').apply(
+    #             lambda group: group[col1].rolling(window, min_periods=window).corr(group[col2])
+    #         )
+    #         # Reset multi-index (from groupby.apply) so that it aligns with df_long.
+    #         rolling_corr_series = rolling_corr_series.reset_index(level=0, drop=True)
+    #         corr_col_name = f'rolling_corr_{col1}_{col2}_{window}'
+    #         features[corr_col_name] = rolling_corr_series
+    #         corr_store[window] = rolling_corr_series
+
+    #         # Day-to-day difference for the rolling correlation.
+    #         features[f'{corr_col_name}_diff'] = rolling_corr_series.groupby(df_long['portfolio_id']).diff()
+
+    #     # 2. Compute cross-window differences: correlation(window1) - correlation(window2)
+    #     for i, w1 in enumerate(windows):
+    #         for w2 in windows[i+1:]:
+    #             diff_name = f'rolling_corr_diff_{col1}_{col2}_{w1}_{w2}'
+    #             features[diff_name] = corr_store[w1] - corr_store[w2]
+
+    #     # 3. Compute RSI and volatility for each correlation series (but not for the diffs).
+    #     for window in windows:
+    #         corr_series = corr_store[window]
+    #         base_name = f'rolling_corr_{col1}_{col2}_{window}'
+
+    #         # Compute RSI for each specified RSI window.
+    #         for rsi_w in rsi_windows:
+    #             rsi_series = corr_series.groupby(df_long['portfolio_id']) \
+    #                                     .transform(lambda x: _compute_rsi(x, rsi_w))
+    #             features[f'{base_name}_rsi_{rsi_w}'] = rsi_series
+
+    #         # Compute rolling volatility for the correlation series.
+    #         vol_series = corr_series.groupby(df_long['portfolio_id']) \
+    #                                 .transform(lambda x: x.rolling(vol_window, min_periods=vol_window).std())
+    #         features[f'{base_name}_volatility_{vol_window}'] = vol_series
+
+    #     return pd.DataFrame(features)
 
     def calculate_rolling_corr_diffs_with_rsi_vol(df_long, col1, col2, windows,
                                                 rsi_windows=[14, 21, 30, 50],
@@ -1564,7 +1696,8 @@ def main(rolling_train_length=2100,
         - RSI values for each correlation series (using specified RSI windows).
         - Rolling volatility (standard deviation) for each correlation series.
         """
-        features = {}
+        # Create an empty DataFrame with the same index as df_long
+        result_df = pd.DataFrame(index=df_long.index)
         corr_store = {}
 
         # Helper: Compute RSI for a given series and window.
@@ -1578,24 +1711,38 @@ def main(rolling_train_length=2100,
 
         # 1. Compute rolling correlations and their day-to-day differences for each window.
         for window in windows:
-            # Compute rolling correlation for each portfolio.
-            rolling_corr_series = df_long.groupby('portfolio_id').apply(
-                lambda group: group[col1].rolling(window, min_periods=window).corr(group[col2])
-            )
-            # Reset multi-index (from groupby.apply) so that it aligns with df_long.
-            rolling_corr_series = rolling_corr_series.reset_index(level=0, drop=True)
+            # Initialize an empty Series with the same index as df_long
+            rolling_corr = pd.Series(index=df_long.index, dtype=float)
+
+            # Calculate rolling correlation for each portfolio separately
+            for portfolio_id, group in df_long.groupby('portfolio_id'):
+                # Calculate rolling correlation for this group
+                group_corr = group[col1].rolling(window, min_periods=window).corr(group[col2])
+
+                # Assign the correlation values to the corresponding indices in the full series
+                rolling_corr.loc[group.index] = group_corr
+
+            # Define column name and add to result DataFrame
             corr_col_name = f'rolling_corr_{col1}_{col2}_{window}'
-            features[corr_col_name] = rolling_corr_series
-            corr_store[window] = rolling_corr_series
-            
-            # Day-to-day difference for the rolling correlation.
-            features[f'{corr_col_name}_diff'] = rolling_corr_series.groupby(df_long['portfolio_id']).diff()
+            result_df[corr_col_name] = rolling_corr
+
+            # Store for later cross-window diff calculation
+            corr_store[window] = rolling_corr
+
+            # Day-to-day difference of this rolling correlation
+            day_diff = pd.Series(index=df_long.index, dtype=float)
+            for portfolio_id, group in df_long.groupby('portfolio_id'):
+                portfolio_indices = group.index
+                portfolio_corr = rolling_corr.loc[portfolio_indices]
+                day_diff.loc[portfolio_indices] = portfolio_corr.diff()
+
+            result_df[f'{corr_col_name}_diff'] = day_diff
 
         # 2. Compute cross-window differences: correlation(window1) - correlation(window2)
         for i, w1 in enumerate(windows):
             for w2 in windows[i+1:]:
                 diff_name = f'rolling_corr_diff_{col1}_{col2}_{w1}_{w2}'
-                features[diff_name] = corr_store[w1] - corr_store[w2]
+                result_df[diff_name] = corr_store[w1] - corr_store[w2]
 
         # 3. Compute RSI and volatility for each correlation series (but not for the diffs).
         for window in windows:
@@ -1604,16 +1751,27 @@ def main(rolling_train_length=2100,
 
             # Compute RSI for each specified RSI window.
             for rsi_w in rsi_windows:
-                rsi_series = corr_series.groupby(df_long['portfolio_id']) \
-                                        .transform(lambda x: _compute_rsi(x, rsi_w))
-                features[f'{base_name}_rsi_{rsi_w}'] = rsi_series
+                # Calculate RSI for each portfolio group separately
+                rsi_values = pd.Series(index=df_long.index, dtype=float)
+                for portfolio_id, group in df_long.groupby('portfolio_id'):
+                    portfolio_indices = group.index
+                    portfolio_corr = corr_series.loc[portfolio_indices]
+                    portfolio_rsi = _compute_rsi(portfolio_corr, rsi_w)
+                    rsi_values.loc[portfolio_indices] = portfolio_rsi
+
+                result_df[f'{base_name}_rsi_{rsi_w}'] = rsi_values
 
             # Compute rolling volatility for the correlation series.
-            vol_series = corr_series.groupby(df_long['portfolio_id']) \
-                                    .transform(lambda x: x.rolling(vol_window, min_periods=vol_window).std())
-            features[f'{base_name}_volatility_{vol_window}'] = vol_series
+            vol_values = pd.Series(index=df_long.index, dtype=float)
+            for portfolio_id, group in df_long.groupby('portfolio_id'):
+                portfolio_indices = group.index
+                portfolio_corr = corr_series.loc[portfolio_indices]
+                portfolio_vol = portfolio_corr.rolling(vol_window, min_periods=vol_window).std()
+                vol_values.loc[portfolio_indices] = portfolio_vol
 
-        return pd.DataFrame(features)
+            result_df[f'{base_name}_volatility_{vol_window}'] = vol_values
+
+        return result_df
 
     if use_correlations > 0:
         # Recommended rolling windows (in days)
@@ -1718,1908 +1876,314 @@ def main(rolling_train_length=2100,
 
     leakage_results = detect_feature_leakage(df_long, target_column="returns", feature_columns=feature_columns)
 
-    #####################################################################
-    #  5. RESHAPING -> 3D ARRAYS
-    #####################################################################
 
-    D = {}
+    #################################################################################
+    # 3. Train Meta Model based on the features and returns
+    #################################################################################
 
-    epsilon = 1e-8
+    CORR_THRESHOLD  = 0.97
+    MI_THRESHOLD    = 0.001
+    RANDOM_STATE = 42
 
-    def get_preprocess_stock(data):
-        "data is M * F"
-        data = np.array(data, dtype = np.float32)
-        a = np.zeros((3, data.shape[-1]))
-        t = np.nan_to_num(data, nan = np.nan, neginf = 1e9)
-        a[0, :] = np.nanmin(t, axis = 0)
-        t = np.nan_to_num(data, nan = np.nan, posinf = -1e9)
-        a[2, :] = np.nanmax(t, axis = 0)
-        for i in range(data.shape[-1]):
-            data[:,i] = np.nan_to_num(data[:,i], nan = np.nan, posinf = a[2,i], neginf = a[0,i])
-            try:
-                if (a[2,i] - a[0,i]) != 0:
-                    data[:,i] = (data[:,i] - a[0,i]) / (a[2,i] - a[0,i])
-                else:
-                    data[:,i] = epsilon
-            except:
-                if i not in D.keys():
-                    D[i] = 0
-                D[i] += 1
-                print(i)
-                print(data[:,i])
-        for i in range(data.shape[-1]):
-            nan_value = 0.0 if np.nanmean(data[:,i]) == np.nan else np.nanmean(data[:,i])
-            data[:,i] = np.nan_to_num(data[:,i], nan = nan_value)
-            a[1, i] = nan_value
-        return data, a
+    from sklearn.feature_selection import mutual_info_regression
+    from sklearn.preprocessing import StandardScaler
 
-    def get_preprocess(data):
-        A = []
-        for i in range(data.shape[1]):
-            data[:,i,:], a = get_preprocess_stock(data[:,i,:])
-            A.append(a)
-        return data, A
+    def correlation_prune(df: pd.DataFrame, thresh: float = CORR_THRESHOLD) -> pd.DataFrame:
+        corr = df.corr().abs()
+        drop = {corr.columns[i] for i in range(len(corr)) for j in range(i) if corr.iloc[i, j] > thresh}
+        return df.drop(columns=list(drop))
 
-    def preprocess_stock(data, a):
-        for i in range(data.shape[-1]):
-            data[:,i] = np.nan_to_num(data[:,i], nan = a[1,i], posinf = a[2,i], neginf = a[0,i])
-        for i in range(data.shape[0]):
-            a[0,:] = np.minimum(a[0,:], data[i,:])
-            a[2,:] = np.maximum(a[2,:], data[i,:])
-            for j in range(data.shape[-1]):
-                try:
-                    if (a[2,j] - a[0,j]) != 0:
-                        data[i,j] = (data[i,j] - a[0,j]) / (a[2,j] - a[0,j])
-                    else:
-                        data[i,j] = epsilon
-                except:
-                    print("!!!!!!\n\n")
-                    print(i,j)
-        return data
 
-    def preprocess(data, A):
-        for i in range(data.shape[1]):
-            data[:,i,:] = preprocess_stock(data[:,i,:], A[i])
-        return data
+    def mi_screen(X: pd.DataFrame, y: pd.Series, thresh: float = MI_THRESHOLD) -> pd.DataFrame:
+        mi = mutual_info_regression(X, y, random_state=RANDOM_STATE)
+        return X.loc[:, mi > thresh]
 
-    # Set up the training dataframe
-    n_assets = len(unique_portfolios)
-    n_features = len(feature_columns)
 
-    # Sort the unique dates to ensure they are in order
-    sorted_dates = pd.to_datetime(np.sort(df_long.date.unique()))
+    pca_df = pd.read_excel("PCA Exposures.xlsx")
+    pca_df['date'] = pd.to_datetime(pca_df['date']).dt.tz_localize(None)
 
-    # Find the closest date to the holdout_start
-    closest_holdout_index = np.abs(sorted_dates - holdout_start).argmin()
+    df_long = df_long.sort_values("date")
+    df_long = pd.merge(df_long, pca_df, on='date', how='left')
+    df_long['positive_return'] = df_long['returns'].apply(lambda x: 0 if x < 0 else 1)
+    # df_long['positive_return'] = df_long['returns'].shift(-4).apply(lambda x: 0 if x < 0 else 1)
 
-    # Calculate the starting index for the rolling window
-    training_start_index = max(0, closest_holdout_index - rolling_train_length)
+    X = df_long[feature_columns]
+    y = df_long["positive_return"]
 
-    # Find the corresponding training start date
-    training_start = sorted_dates[training_start_index]
+    # -------------------- 2. Chronological train / test split --------
+    split = int(len(X)*0.8)                          # 80 / 20 time‑ordered split
+    X_train, X_test = X.iloc[:split],  X.iloc[split:]
+    y_train, y_test = y.iloc[:split], y.iloc[split:]
 
-    # Filter the DataFrame based on the calculated training_start
-    training_df = df_long[df_long.date >= training_start]
-
-    # Step 1: Pivot the DataFrame so that features become columns
-    df_pivoted = training_df[feature_columns + ["date", "portfolio_id"]].pivot(index='date', columns='portfolio_id')
-
-    # Step 2: MultiIndex columns will now represent (portfolio_id, feature_name)
-    df_pivoted = df_pivoted.sort_index(axis=1)  # Sort columns for consistency
-
-    # Step 3: Convert to 3D NumPy array
-    M = df_pivoted.shape[0]  # Number of time steps (dates)
-    N = len(df_pivoted.columns.levels[1])  # Number of assets (portfolio IDs)
-    F = len(df_pivoted.columns.levels[0])  # Number of features
-
-    # Reshape the data to (M, N, F)
-    feature_array_3d = df_pivoted.to_numpy().reshape(M, N, F)
-
-    # Second array (returns)
-    df_pivoted_returns = training_df.pivot(index='date', columns='portfolio_id', values='returns')
-    df_pivoted_returns = df_pivoted_returns.sort_index(axis=1)
-
-    # Convert to 2D numpy array (M days × N portfolios)
-    returns_array_2d = df_pivoted_returns.to_numpy()
-    
-    print(f"Feature generation time:{(time.time() - feature_gen_start):.3f} s\n")
-    print(f"Shape of the 3D feature array: {feature_array_3d.shape}")  # Should be (~, 19, 72)
-    print(f"Shape of the 2D returns array: {returns_array_2d.shape}")  # Should be (~, 19)
-
-    #####################################################################
-    #  6. LISTFOLD MODEL + TRAINING
-    #####################################################################
-
-    import numpy as np
-    import torch
-    import pandas as pd
-    from torch import nn, optim
-    import torch.nn.functional as F
-    from torch.autograd import Variable
-    import copy
-
-    import torch.optim as optim
-    import torch.nn.functional as F
-    from torch.amp import autocast, GradScaler
-
-    # Set these for reproducible results and stable training
-    def set_random_seeds(seed=42):
-        """Set random seeds for reproducibility."""
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(seed)
-            torch.cuda.manual_seed_all(seed)
-        # For GPU determinism (slows down performance if True):
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-    #########################################################################
-    # Custom Loss (Vectorized)
-    #########################################################################
-    class Closs_explained(nn.Module):
-        def __init__(self):
-            super(Closs_explained, self).__init__()
-
-        def forward(self, f, num_stocks):
-            """
-            f: Tensor of shape (batch_size, n_assets)
-            num_stocks: integer = n_assets
-            """
-            # s = half of the number of stocks
-            if clamp_gradients == 1:
-                f = torch.clamp(f, -10, 10)
-            s = num_stocks // 2
-
-            # ---------------------------------------------------------
-            # 1) Use prefix sums to compute partial sums quickly.
-            #    We'll pad at dim=1 by zero so cumsum indices align.
-            #    prefix_f[i, j] = sum of f[i, 0..j-1]
-            # ---------------------------------------------------------
-            prefix_f = torch.cat([torch.zeros_like(f[:, :1]), f], dim=1).cumsum(dim=1)
-            prefix_exp_f = torch.cat([torch.zeros_like(f[:, :1]), torch.exp(f)], dim=1).cumsum(dim=1)
-            prefix_exp_neg_f = torch.cat([torch.zeros_like(f[:, :1]), torch.exp(-f)], dim=1).cumsum(dim=1)
-
-            # ---------------------------------------------------------
-            # 2) Base term: sum of second half minus sum of first half
-            #    sum(f[:,s:]) - sum(f[:,:s]) via prefix sums:
-            #    sum(f[:,s:]) = prefix_f[:, n_assets] - prefix_f[:, s]
-            #    sum(f[:,:s]) = prefix_f[:, s] - prefix_f[:, 0]
-            #    So difference = prefix_f[:, n_assets] - 2 * prefix_f[:, s]
-            # ---------------------------------------------------------
-            l = prefix_f[:, -1] - 2.0 * prefix_f[:, s]   # shape: (batch_size,)
-
-            # ---------------------------------------------------------
-            # 3) Accumulate the log(...) terms for i=0..(s-1)
-            #    Using prefix sums again for partial sums of exp_f and exp_neg_f
-            #    term1 = sum_{k=i}^{n_assets-i-1} exp_f
-            #          = prefix_exp_f[:, n_assets-i] - prefix_exp_f[:, i]
-            #    term2 = sum_{k=i}^{n_assets-i-1} exp_neg_f
-            #          = prefix_exp_neg_f[:, n_assets-i] - prefix_exp_neg_f[:, i]
-            #    We'll gather these in one vectorized pass.
-            # ---------------------------------------------------------
-            i_range = torch.arange(s, device=f.device)          # 0,1,2,...,s-1
-            start_idx = i_range
-            end_idx = (num_stocks - i_range)
-
-            # For each batch row, gather from prefix sums:
-            bsz = f.shape[0]
-            start_expand = start_idx.unsqueeze(0).expand(bsz, s)
-            end_expand = end_idx.unsqueeze(0).expand(bsz, s)
-
-            term1 = torch.gather(prefix_exp_f, 1, end_expand) - torch.gather(prefix_exp_f, 1, start_expand)
-            term2 = torch.gather(prefix_exp_neg_f, 1, end_expand) - torch.gather(prefix_exp_neg_f, 1, start_expand)
-
-            # subtract_const = (num_stocks - 2*i)
-            subtract_array = (num_stocks - 2.0 * i_range).unsqueeze(0).expand(bsz, s)
-
-            # # Carefully log(...) everything in one shot
-            # inside_log = term1 * term2 - subtract_array
-            # logs_sum = torch.log(inside_log).sum(dim=1)  # sum over i dimension
-
-            epsilon = 1e-8  # small constant to avoid log(0)
-
-            # Compute inside_log as before
-            inside_log = term1 * term2 - subtract_array
-
-            # Clamp inside_log to ensure it's at least epsilon
-            inside_log = torch.clamp(inside_log, min=epsilon)
-
-            logs_sum = torch.log(inside_log).sum(dim=1)
-
-            # ---------------------------------------------------------
-            # 4) Add logs_sum to the base term and then mean over batch
-            # ---------------------------------------------------------
-            l = l + logs_sum   # shape: (batch_size,)
-            return l.mean()    # final scalar
-
-    #########################################################################
-    # Models (with different activation functions)
-    #########################################################################
-
-    def weights_init(m, seed=42):
-        """Simple weight initialization with controlled random seed."""
-        torch.manual_seed(seed)
-        classname = m.__class__.__name__
-        if classname.find('Linear') != -1:
-            m.weight.data.normal_(mean=0.0, std=0.05)
-            m.bias.data.fill_(0.05)
-
-    def mish(x):
-        return x * torch.tanh(F.softplus(x))
-
-    def swish(x):
-        return x * torch.sigmoid(x)
-
-
-    # Base ReLU Model
-    class CMLE(nn.Module):
-        def __init__(self, n_features, seed=42):
-            super(CMLE, self).__init__()
-            self.seed = seed
-            self.n_features = n_features
-            self.linear1 = nn.Linear(self.n_features, self.n_features * 4)
-            self.linear2 = nn.Linear(self.n_features * 4, self.n_features * 2)
-            self.linear3 = nn.Linear(self.n_features * 2, self.n_features // 2)
-            self.linear4 = nn.Linear(self.n_features // 2, 1)
-            self.apply(lambda m: weights_init(m, seed))
-
-        def forward(self, x):
-            # x: (batch_size, n_assets, n_features)
-            x = F.relu(self.linear1(x))
-            x = F.relu(self.linear2(x))
-            x = F.relu(self.linear3(x))
-            x = F.relu(self.linear4(x))
-            # Reshape => (batch_size, n_assets)
-            return x.view(x.shape[0], x.shape[1])
-
-
-    # Leaky ReLU Model
-    class CMLE_leaky(nn.Module):
-        def __init__(self, n_features, seed=42):
-            super(CMLE_leaky, self).__init__()
-            self.seed = seed
-            self.n_features = n_features
-            self.linear1 = nn.Linear(self.n_features, self.n_features * 4)
-            self.linear2 = nn.Linear(self.n_features * 4, self.n_features * 2)
-            self.linear3 = nn.Linear(self.n_features * 2, self.n_features // 2)
-            self.linear4 = nn.Linear(self.n_features // 2, 1)
-            self.apply(lambda m: weights_init(m, seed))
-
-        def forward(self, x):
-            x = F.leaky_relu(self.linear1(x), negative_slope=0.01)
-            x = F.leaky_relu(self.linear2(x), negative_slope=0.01)
-            x = F.leaky_relu(self.linear3(x), negative_slope=0.01)
-            x = F.leaky_relu(self.linear4(x), negative_slope=0.01)
-            return x.view(x.shape[0], x.shape[1])
-
-
-    # Mish Model
-    class MISH_CMLE(nn.Module):
-        def __init__(self, n_features, seed=42):
-            super(MISH_CMLE, self).__init__()
-            self.seed = seed
-            self.n_features = n_features
-            self.linear1 = nn.Linear(self.n_features, self.n_features * 4)
-            self.linear2 = nn.Linear(self.n_features * 4, self.n_features * 2)
-            self.linear3 = nn.Linear(self.n_features * 2, self.n_features // 2)
-            self.linear4 = nn.Linear(self.n_features // 2, 1)
-            self.apply(lambda m: weights_init(m, seed))
-
-        def forward(self, x):
-            x = mish(self.linear1(x))
-            x = mish(self.linear2(x))
-            x = mish(self.linear3(x))
-            x = mish(self.linear4(x))
-            return x.view(x.shape[0], x.shape[1])
-
-
-    # Swish Model
-    class SWISH_CMLE(nn.Module):
-        def __init__(self, n_features, seed=42):
-            super(SWISH_CMLE, self).__init__()
-            self.seed = seed
-            self.n_features = n_features
-            self.linear1 = nn.Linear(self.n_features, self.n_features * 4)
-            self.linear2 = nn.Linear(self.n_features * 4, self.n_features * 2)
-            self.linear3 = nn.Linear(self.n_features * 2, self.n_features // 2)
-            self.linear4 = nn.Linear(self.n_features // 2, 1)
-            self.apply(lambda m: weights_init(m, seed))
-
-        def forward(self, x):
-            x = swish(self.linear1(x))
-            x = swish(self.linear2(x))
-            x = swish(self.linear3(x))
-            x = swish(self.linear4(x))
-            return x.view(x.shape[0], x.shape[1])
-        
-
-    class ResMarket_CMLE(nn.Module):
-        def __init__(self, n_features, seed=42):
-            super(ResMarket_CMLE, self).__init__()
-            self.seed = seed
-            torch.manual_seed(seed)
-
-            # Shared layers for each asset
-            self.linear1 = nn.Linear(n_features, 128)
-            self.layer_norm1 = nn.LayerNorm(128)
-            self.linear2 = nn.Linear(128, 64)
-            self.skip1 = nn.Linear(128, 64)  # Skip connection
-            self.layer_norm2 = nn.LayerNorm(64)
-            self.linear3 = nn.Linear(64, 1)
-
-        def forward(self, x):
-            # x: (batch_size, n_assets, n_features_per_asset)
-            batch_size, n_assets, _ = x.shape
-
-            # Apply shared layers to each asset
-            x = swish(self.layer_norm1(self.linear1(x)))  # (batch_size, n_assets, 128)
-            x2 = self.linear2(x)  # (batch_size, n_assets, 64)
-            skip = self.skip1(x)  # (batch_size, n_assets, 64)
-            x = swish(x2 + skip)  # Residual connection
-            x = self.layer_norm2(x)  # (batch_size, n_assets, 64)
-            x = self.linear3(x)  # (batch_size, n_assets, 1)
-
-            # Squeeze the last dimension to get scores
-            x = x.squeeze(-1)  # (batch_size, n_assets)
-            return x
-
-
-
-    #########################################################################
-    # Utility functions
-    #########################################################################
-
-    def rank_based_conformal_calibrate(
-        true_ranks: np.ndarray,
-        pred_ranks: np.ndarray,
-        alpha: float = 0.1,
-        mode: str = "single_best"
-    ):
-        """
-        Compute the rank-based nonconformity distribution from 'calibration' data and
-        return the threshold that ensures coverage 1 - alpha.
-
-        Parameters
-        ----------
-        true_ranks : np.ndarray, shape (calib_days, n_assets)
-            The "true" rank of each asset on each calibration day.
-            Lower = better (0 = best, 1 = second best, etc.).
-        pred_ranks : np.ndarray, shape (calib_days, n_assets)
-            The "predicted" rank for each asset on each calibration day
-            from your model. Lower = better predicted.
-        alpha : float
-            Significance level: e.g. alpha=0.1 => coverage=90%.
-        mode : {"single_best", "entire_top_k", "single_worst", ...}
-            - "single_best": ensures the single truly best asset is contained in
-            your top picks at least (1 - alpha) fraction of the time.
-            - "single_worst": ensures the single truly worst asset is contained in
-            your bottom picks at least (1 - alpha) fraction of the time.
-            - "entire_top_k": can be used if you want coverage for all top-k truly best.
-
-        Returns
-        -------
-        threshold : int
-            The conformal rank threshold. If threshold = 7, that means
-            you generally need to pick everyone with predicted_rank <= 7
-            to achieve coverage. If threshold=8, you need to pick up to 8, etc.
-        """
-
-        # 1) Identify the "nonconformity" each day. For "single_best", we find
-        #    which asset is truly best => the one that has the lowest 'true_ranks' value.
-        #    Then we see what predicted_rank that asset had => pred_ranks[day, best_idx].
-        #    Collect those for all calibration days => that is your distribution.
-
-        n_days, n_assets = true_ranks.shape
-        nonconformity_vals = []
-
-        if mode in ["single_best", "entire_top_k"]:  # We want the truly best
-            for day in range(n_days):
-                # truly best asset = where true_ranks is min
-                # (lowest = best, if 0-based)
-                best_idx = np.argmin(true_ranks[day, :])
-                # predicted rank of that truly best asset
-                pred_rank_of_best = pred_ranks[day, best_idx]  # 0-based rank
-                nonconformity_vals.append(pred_rank_of_best)
-
-        elif mode == "single_worst":
-            # If we want the single truly worst asset in the "bottom picks"
-            # the truly worst is the highest rank =>  e.g. argmax
-            for day in range(n_days):
-                worst_idx = np.argmax(true_ranks[day, :])
-                pred_rank_of_worst = pred_ranks[day, worst_idx]
-                nonconformity_vals.append(pred_rank_of_worst)
-
-        # If you want "entire_top_k", you'd do a slightly more advanced approach:
-        #   For example, find the asset that was the k-th best in the true rank,
-        #   then note where that asset appeared in the predicted rank.
-        #   That is a bit more specialized; code omitted for brevity.
-        #   You can replicate a similar pattern.
-
-        nonconformity_vals = np.array(nonconformity_vals)
-        nonconformity_vals.sort()
-        n_cal = len(nonconformity_vals)
-
-        # 2) The rank threshold for coverage = the (1-alpha) quantile
-        #    => index = ceil((1-alpha)*n_cal)-1 (but clamp >= 0)
-        idx = int(np.ceil((1 - alpha) * n_cal)) - 1
-        idx = max(idx, 0)
-
-        threshold = int(nonconformity_vals[idx])
-        return threshold
-
-    def rank_based_conformal_apply(
-        pred_ranks_test: np.ndarray,
-        threshold: int,
-        default_k: int = 7,
-        side: str = "top"
-    ):
-        """
-        Given the predicted ranks for the test set (one or many days),
-        decide how many you must pick to ensure the coverage from 'threshold'.
-        For example, if threshold=8, you may pick top-8 (for side="top").
-        For side="bottom", you pick bottom-8, etc.
-
-        Parameters
-        ----------
-        pred_ranks_test : np.ndarray, shape (test_days, n_assets)
-            Predicted ranks for the holdout/test chunk.
-            e.g. pred_ranks_test[day, asset] = 0-based rank of that asset.
-        threshold : int
-            The conformal rank threshold from rank_based_conformal_calibrate.
-        default_k : int
-            The baseline number you want to pick (like 7). If threshold says 8,
-            we will pick 8. If threshold is less than 7, do you want to pick only 6?
-            Typically we do max(default_k, threshold+1) or something similar.
-        side : {"top", "bottom"}
-            - "top": pick everything with predicted_rank <= pick_size-1.
-            - "bottom": pick from the other end.
-
-        Returns
-        -------
-        picks_array : list of lists
-            picks_array[day_idx] = list of asset indices included for that day.
-        pick_size_used : int
-            The final number of assets actually included each day
-            (or it could be a list if you do day-by-day logic).
-        """
-
-        test_days, n_assets = pred_ranks_test.shape
-
-        # If threshold = 7 => we pick rank <= 7. But is that 0..7 (8 total)?
-        # Usually if rank=7 means the best 8.
-        # So let's define an offset.
-        # If we want to interpret threshold=7 => we pick top 8, do threshold + 1.
-        # You can tweak as desired.
-        pick_size = max(default_k, threshold + 1)
-
-        picks_array = []
-
-        for day in range(test_days):
-            if side == "top":
-                # 1) find assets whose predicted rank <= pick_size-1
-                # (lowest rank means best predicted)
-                day_ranks = pred_ranks_test[day, :]
-                chosen = np.where(day_ranks < pick_size)[0]
-                picks_array.append(chosen.tolist())
-
-            elif side == "bottom":
-                # we do the symmetrical approach:
-                # if threshold=7 => pick the 8 worst assets
-                # that means rank >= n_assets - pick_size
-                day_ranks = pred_ranks_test[day, :]
-                # we define "worst" as the largest ranks
-                # so we pick everything with rank >= n_assets - pick_size
-                chosen = np.where(day_ranks >= (n_assets - pick_size))[0]
-                picks_array.append(chosen.tolist())
-
-        return picks_array, pick_size
-
-    def return_rank(a):
-        """
-        Returns the rank ordering of array 'a' (ascending).
-        For example, if a = [4, 1, 9], then rank = [1, 0, 2].
-        """
-        a = -1.0 * a
-        order = a.argsort()
-        return order.argsort()
-
-    def get_predicted_ranks(scores):
-        """Convert model scores to ranks (one row at a time)."""
-        return np.array([return_rank(s) for s in scores])
-
-    def random_batch_precomputed_gpu(features_sorted_gpu, batch_size, seed=None):
-        """
-        Randomly select 'batch_size' days from 'features_sorted_gpu' (on GPU).
-        features_sorted_gpu: Tensor of shape (num_days, n_assets, n_features)
-        """
-        if seed is not None:
-            torch.manual_seed(seed)
-        num_days = features_sorted_gpu.shape[0]
-        indices = torch.randint(low=0, high=num_days, size=(batch_size,),
-                                device=features_sorted_gpu.device)
-        return features_sorted_gpu[indices]
-    
-
-    if custom_tie_breaks == 1:
-
-        ############################################################################
-        # 1) Define your custom tie-break order
-        ############################################################################
-        new_default_order = [0,20,19,18,17,16,15,13,12,14,21,11,9,8,7,5,4,3,6,2,1,10,22]
-        tie_break_rank = { idx: pos for pos, idx in enumerate(new_default_order) }
-
-        ############################################################################
-        # 2) The replacement for `return_rank(a)`
-        ############################################################################
-        def return_rank(a):
-            """
-            Returns the rank ordering of array `a` in descending order,
-            breaking ties using the custom `new_default_order`.
-
-            rank[i] = 0 means the element at index i is the "best" (highest score);
-            rank[i] = 1 means second place, and so on.
-
-            Example:
-            If all elements of `a` are equal, the rank of index i is
-            tie_break_rank[i] in ascending order.
-            """
-            # Sort all indices from "largest score" to "smallest score".
-            # If two scores tie, compare tie_break_rank[i].
-            indices = sorted(range(len(a)), key=lambda i: (-a[i], tie_break_rank[i]))
-            
-            # Build the rank array: rank[i] = the position of i in the sorted list
-            rank = np.empty(len(a), dtype=int)
-            for r, i in enumerate(indices):
-                rank[i] = r
-            return rank
-
-        ############################################################################
-        # 3) The replacement for `get_predicted_ranks(scores)`
-        ############################################################################
-        def get_predicted_ranks(scores):
-            """
-            Convert model scores to ranks (one row at a time).
-            """
-            return np.array([return_rank(row) for row in scores])
-
-
-    #########################################################################
-    # 7. BACKTEST & TRAIN LOOP
-    #########################################################################
-
-    def backtest(model, features, returns, dates, top_k=8, avg_loss=0,
-                lookback_loss=0, short_type='bottom'):
-        """
-        Backtest the model on the given features & returns data.
-        Args:
-            model: trained model (on GPU)
-            features: np.array, shape (num_days, n_assets, n_features)
-            returns:  np.array, shape (num_days, n_assets)
-            dates:    np.array or list of date-strings
-            top_k:    how many positions to go long/short
-            short_type: 'bottom' or 'average'
-        """
-        device = next(model.parameters()).device
-
-        # Move features to torch tensor on device, get model scores
-        features_tensor = torch.from_numpy(features).float().to(device)
-        with torch.no_grad():
-            scores_tensor = model(features_tensor)
-        scores = scores_tensor.cpu().numpy()  # shape: (num_days, n_assets)
-
-        results = []
-        positions_long = []
-        positions_short = []
-        returns_long = []
-        returns_short = []
-        predicted_ranks = []
-        dates_list = []
-
-        n_assets = returns.shape[1]
-        for i in range(len(scores)):
-            rank = return_rank(scores[i])  # ascending rank
-            rank2ind = np.zeros(len(rank), dtype=int)
-            for j in range(len(rank)):
-                rank2ind[rank[j]] = j
-
-            predicted_ranks.append(rank)
-            dates_list.append(dates[i])
-
-            # Calculate returns for that day
-            total_return = 0.0
-            weights = np.ones(top_k) / top_k
-
-            # Long positions
-            long_pos = []
-            long_ret = []
-            for j in range(top_k):
-                idx = rank2ind[j]  # top_k (lowest) ranks => best because we multiplied scores by -1
-                total_return += weights[j] * returns[i][idx]
-                long_pos.append(idx)
-                long_ret.append(returns[i][idx])
-
-            # Short positions
-            short_pos = []
-            short_ret = []
-            if short_type == 'bottom':
-                for j in range(top_k):
-                    idx = rank2ind[(n_assets - 1) - j]
-                    total_return -= weights[j] * returns[i][idx]
-                    short_pos.append(idx)
-                    short_ret.append(returns[i][idx])
-            elif short_type == 'average':
-                # short vs. entire average market
-                market_return = np.mean(returns[i])
-                total_return -= market_return
-
-            results.append(total_return)
-            positions_long.append(long_pos)
-            positions_short.append(short_pos)
-            returns_long.append(long_ret)
-            returns_short.append(short_ret)
-
-        return (np.array(results),
-                np.array(positions_long),
-                np.array(positions_short),
-                np.array(returns_long),
-                np.array(returns_short),
-                np.array(predicted_ranks),
-                top_k,
-                np.array(dates_list),
-                returns,  # actual returns
-                scores,   # raw scores
-                avg_loss,
-                lookback_loss)
-
-
-    def precompute_sorted_data(features, ranks):
-        """
-        Pre-sort the features for each day based on its rank ordering.
-        features: (num_days, n_assets, n_features)
-        ranks:    (num_days, n_assets)
-        """
-        features_sorted = np.zeros_like(features)
-        num_days = len(features)
-
-        for day_index in range(num_days):
-            day_rank = return_rank(ranks[day_index])  # ascending rank
-            # day_rank tells you how to permute day_index's assets
-            for j, stock_idx in enumerate(day_rank):
-                # place features[day_index, j, :] in new location
-                features_sorted[day_index, stock_idx, :] = features[day_index, j, :]
-        return features_sorted
-
-    def train__evaluate_listfold(features,
-                                ranks,
-                                epochs,
-                                test_features,
-                                test_returns,
-                                test_dates,
-                                seed=42):
-        """
-        Training loop with:
-        - Pre-sorting data,
-        - Automatic Mixed Precision,
-        - Vectorized custom loss,
-        - GPU batch sampling.
-        Returns backtest results for top_k in range(1, n_k).
-        """
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        set_random_seeds(seed)
-
-        # 1) Precompute & move data to GPU
-        features_sorted = precompute_sorted_data(features, ranks)
-        features_sorted_gpu = torch.from_numpy(features_sorted).float().to(device)
-
-        # 2) Build model, loss, optimizer
-        if act_func == 'leaky':
-            model = CMLE_leaky(n_features=n_features, seed=seed).to(device)
-        elif act_func == 'mish':
-            model = MISH_CMLE(n_features=n_features, seed=seed).to(device)
-        elif act_func == 'swish':
-            model = SWISH_CMLE(n_features=n_features, seed=seed).to(device)
-        elif act_func == 'res_market':
-            model = ResMarket_CMLE(n_features=n_features, seed=seed).to(device)
-        else:
-            model = CMLE(n_features=n_features, seed=seed).to(device)
-        # model = torch.compile(model) #, mode='reduce-overhead') 
-        loss_fn = Closs_explained()
-        opt = optim.Adam(model.parameters(), lr=learning_rate)
-
-        print("Model built and moved to device:", device)
-        print(f"Using activation: {act_func}")
-
-        # Automatic Mixed Precision
-        scaler = GradScaler(enabled=True) #, device_type='cuda')
-
-        # For tracking time
-        time_data_total = 0.0
-        time_fwd_total = 0.0
-        time_loss_total = 0.0
-        time_bwd_total = 0.0
-
-        running_loss = []
-        start_all = time.time()
-
-        for itr in range(epochs):
-            # -- DATA (random batch) --
-            t0 = time.time()
-            batch_x = random_batch_precomputed_gpu(features_sorted_gpu, batch_size, seed=seed + itr)
-            t1 = time.time()
-            time_data_total += (t1 - t0)
-
-            # -- Forward + Loss under autocast --
-            model.train()
-            with autocast(device_type="cuda"):
-                t2 = time.time()
-                scores = model(batch_x)  # shape: (batch_size, n_assets)
-                t3 = time.time()
-                time_fwd_total += (t3 - t2)
-
-                # n_assets constant as tensor
-                n_assets_t = torch.tensor(n_assets, device=device, requires_grad=False)
-                t4 = time.time()
-                l = loss_fn(scores, n_assets_t)
-                t5 = time.time()
-                time_loss_total += (t5 - t4)
-
-            # -- Backprop + Optim Step (scaled) --
-            t6 = time.time()
-            opt.zero_grad(set_to_none=True)
-            scaler.scale(l).backward()
-
-            # Unscale gradients before clipping (this step is important when using GradScaler)
-            scaler.unscale_(opt)
-
-            # Clip gradients to a maximum norm of 1.0
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(opt)
-            scaler.update()
-            t7 = time.time()
-            time_bwd_total += (t7 - t6)
-
-            running_loss.append(float(l))
-        total_time = time.time() - start_all
-        avg_loss = np.mean(running_loss) if len(running_loss) > 0 else 0.0
-        print(f"Finished {epochs} epochs, final avg loss: {avg_loss:.4f}, abs: {np.mean(np.abs(running_loss))}")
-        # print(running_loss)
-
-        print(f"Total training time: {total_time:.3f} s")
-        other_time = total_time - (time_data_total + time_fwd_total + time_loss_total + time_bwd_total)
-        print("Time breakdown:")
-        print(f"  Data sampling time:   {time_data_total:.3f} s")
-        print(f"  Forward pass time:    {time_fwd_total:.3f} s")
-        print(f"  Loss computation:     {time_loss_total:.3f} s")
-        print(f"  Backward + step time: {time_bwd_total:.3f} s")
-        print(f"  Other overhead:       {other_time:.3f} s\n")
-
-        # 3) Evaluate / Backtest across multiple top_k
-        all_backtests = []
-        for k in range(1, n_k):
-            # We pass the final average loss as an example argument
-            all_backtests.append(
-                backtest(model,
-                        test_features,
-                        test_returns,
-                        test_dates,
-                        top_k=k,
-                        avg_loss=avg_loss,
-                        lookback_loss=np.mean(running_loss[-30:]) if len(running_loss) >= 30 else avg_loss,
-                        short_type='bottom')
-            )
-        return all_backtests, model
-    
-    def train__evaluate_listfold_live(features,
-                                ranks,
-                                epochs,
-                                seed=42):
-        """
-        Training loop with:
-        - Pre-sorting data,
-        - Automatic Mixed Precision,
-        - Vectorized custom loss,
-        - GPU batch sampling.
-        Returns backtest results for top_k in range(1, n_k).
-        """
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        set_random_seeds(seed)
-
-        # 1) Precompute & move data to GPU
-        features_sorted = precompute_sorted_data(features, ranks)
-        features_sorted_gpu = torch.from_numpy(features_sorted).float().to(device)
-
-        # 2) Build model, loss, optimizer
-        if act_func == 'leaky':
-            model = CMLE_leaky(n_features=n_features, seed=seed).to(device)
-        elif act_func == 'mish':
-            model = MISH_CMLE(n_features=n_features, seed=seed).to(device)
-        elif act_func == 'swish':
-            model = SWISH_CMLE(n_features=n_features, seed=seed).to(device)
-        elif act_func == 'res_market':
-            model = ResMarket_CMLE(n_features=n_features, seed=seed).to(device)
-        else:
-            model = CMLE(n_features=n_features, seed=seed).to(device)
-        # model = torch.compile(model) #, mode='reduce-overhead')
-        loss_fn = Closs_explained()
-        opt = optim.Adam(model.parameters(), lr=learning_rate)
-
-        print("Model built and moved to device:", device)
-        print(f"Using activation: {act_func}")
-
-        # Automatic Mixed Precision
-        scaler = GradScaler(enabled=True) #, device_type='cuda')
-
-        # For tracking time
-        time_data_total = 0.0
-        time_fwd_total = 0.0
-        time_loss_total = 0.0
-        time_bwd_total = 0.0
-
-        running_loss = []
-        start_all = time.time()
-
-        for itr in range(epochs):
-            # -- DATA (random batch) --
-            t0 = time.time()
-            batch_x = random_batch_precomputed_gpu(features_sorted_gpu, batch_size, seed=seed + itr)
-            t1 = time.time()
-            time_data_total += (t1 - t0)
-
-            # -- Forward + Loss under autocast --
-            model.train()
-            with autocast(device_type="cuda"):
-                t2 = time.time()
-                scores = model(batch_x)  # shape: (batch_size, n_assets)
-                t3 = time.time()
-                time_fwd_total += (t3 - t2)
-
-                # n_assets constant as tensor
-                n_assets_t = torch.tensor(n_assets, device=device, requires_grad=False)
-                t4 = time.time()
-                l = loss_fn(scores, n_assets_t)
-                t5 = time.time()
-                time_loss_total += (t5 - t4)
-
-            # -- Backprop + Optim Step (scaled) --
-            t6 = time.time()
-            opt.zero_grad(set_to_none=True)
-            scaler.scale(l).backward()
-
-            # Unscale gradients before clipping (this step is important when using GradScaler)
-            scaler.unscale_(opt)
-
-            # Clip gradients to a maximum norm of 1.0
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(opt)
-            scaler.update()
-            t7 = time.time()
-            time_bwd_total += (t7 - t6)
-
-            running_loss.append(float(l))
-        total_time = time.time() - start_all
-        avg_loss = np.mean(running_loss) if len(running_loss) > 0 else 0.0
-        print(f"Finished {epochs} epochs, final avg loss: {avg_loss:.4f}, abs: {np.mean(np.abs(running_loss))}")
-        # print(running_loss)
-
-        print(f"Total training time: {total_time:.3f} s")
-        other_time = total_time - (time_data_total + time_fwd_total + time_loss_total + time_bwd_total)
-        print("Time breakdown:")
-        print(f"  Data sampling time:   {time_data_total:.3f} s")
-        print(f"  Forward pass time:    {time_fwd_total:.3f} s")
-        print(f"  Loss computation:     {time_loss_total:.3f} s")
-        print(f"  Backward + step time: {time_bwd_total:.3f} s")
-        print(f"  Other overhead:       {other_time:.3f} s\n")
-        return model
-
-    # =============================================================================
-    # CONFIGURATIONS
-    # =============================================================================
-
-    PROJECT_ID = "issachar-feature-library"
-    REGION = "us-central1"
-    STAGING_BUCKET = "gs://qjg-test"
-    DESTINATION_DATASET = "qjg_model_runs"
-
-    # Initialize GCS and BigQuery clients once
-    storage_client = storage.Client(project=PROJECT_ID)
-    bigquery_client = bigquery.Client(project=PROJECT_ID)
-
-    def sanitize_and_convert_columns(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Sanitize column names to meet BigQuery requirements and convert
-        datetime64[ns, UTC] columns to datetime64[ns] for compatibility.
-        """
-        # Sanitize column names
-        df = df.rename(columns=lambda col: (
-            col.replace(" ", "_")
-            .replace("%", "pct")
-            .replace("(", "")
-            .replace(")", "")
-            .replace("-", "_")
-            .replace("/", "_")
-            .lower()
-        ))
-        # Convert datetime64[ns, UTC] to datetime64[ns]
-        for col in df.select_dtypes(include=["datetime64[ns, UTC]"]).columns:
-            df[col] = df[col].dt.tz_localize(None)
-
-        return df
-
-    def append_to_bigquery(
-        df: pd.DataFrame,
-        dataset_id: str,
-        table_name: str,
-        project_id: str = PROJECT_ID
-    ) -> None:
-        """
-        Append data to a BigQuery table, automatically creating the table if it
-        doesn't exist and inferring the schema from the DataFrame.
-        """
-        table_id = f"{project_id}.{dataset_id}.{table_name}"
-
-        # Convert datetime64[ns] columns to timestamp-friendly strings
-        for col in df.select_dtypes(include=["datetime64[ns]"]).columns:
-            df[col] = df[col].dt.strftime('%Y-%m-%d %H:%M:%S')
-
-        job_config = bigquery.LoadJobConfig(
-            write_disposition=bigquery.WriteDisposition.WRITE_APPEND
-        )
-
-        try:
-            load_job = bigquery_client.load_table_from_dataframe(
-                df, table_id, job_config=job_config
-            )
-            load_job.result()
-            logging.info(f"Appended data to table {table_id} successfully.")
-        except Exception as e:
-            logging.error(f"Failed to append data to {table_id}: {str(e)}")
-            raise
-
-    def create_or_replace_bigquery_table(
-        df: pd.DataFrame,
-        dataset_id: str,
-        table_name: str,
-        project_id: str = PROJECT_ID
-    ) -> None:
-        """
-        Create or replace a BigQuery table using the data from a DataFrame.
-        The table schema is automatically inferred from the DataFrame,
-        and any existing table will be replaced.
-        """
-        table_id = f"{project_id}.{dataset_id}.{table_name}"
-
-        # Convert datetime64[ns] columns to a format that BigQuery can interpret as a timestamp.
-        for col in df.select_dtypes(include=["datetime64[ns]"]).columns:
-            df[col] = df[col].dt.strftime('%Y-%m-%d %H:%M:%S')
-
-        # Configure the job to create or replace the table.
-        job_config = bigquery.LoadJobConfig(
-            write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
-        )
-
-        try:
-            load_job = bigquery_client.load_table_from_dataframe(
-                df, table_id, job_config=job_config
-            )
-            load_job.result()  # Wait for the load job to complete.
-            logging.info(f"Created or replaced table {table_id} successfully.")
-        except Exception as e:
-            logging.error(f"Failed to create or replace table {table_id}: {str(e)}")
-            raise
-
-
-    # =============================================================================
-    # HELPER FUNCTIONS
-    # =============================================================================
-    # TODO: Add the following notes from Josh: Is final input an outlier? | Is the volatility higher currently than historical? Z-Score? | Correlation structure changing ? How much divergence is there? | Look at 63/252 days vs bulk?
-    def compute_nn_data_quality_metrics(
-        df, 
-        lookback=2000, 
-        std_threshold=4.0,
-        perc_diff_thresh=2
-    ):
-        
-        metrics_list = []
-        
-        # Group the DataFrame by portfolio_id (each ETF)
-        percent_changes = []
-        for pid, group in df.groupby('portfolio_id'):
-            # Select the most recent `lookback` rows for the current portfolio
-            group_recent = group.tail(lookback)
-            
-            # Compute metrics for each numeric column in the subset
-            for col in group_recent.columns:
-                # Skip the portfolio_id column and any non-numeric columns
-                if col in ['portfolio_id', 'qid']:
-                    continue
-                s = group_recent[col]
-                if pd.api.types.is_datetime64_any_dtype(s) or pd.api.types.is_string_dtype(s):
-                    continue
-                
-                # Drop NA values to avoid issues in calculations
-                s = s.dropna()
-                s = s.replace([float('inf'), -float('inf')], 0) 
-                s_count = len(s)
-                s = s[s != 0]  # Exclude zero values for outlier detection
-                if s.empty:
-                    continue
-                
-                # ===== Check if the latest value is an outlier =====
-                # Compare the latest input against historical values (all but the latest)
-                if len(s) > 1:
-                    latest_value = s.iloc[-1]
-                    historical_data = s.iloc[:-1]
-                    hist_min = historical_data.min()
-                    hist_max = historical_data.max()
-
-                    # Calculate percentage difference from historical min
-                    pct_diff_from_min = ((latest_value - hist_min) / (hist_max-hist_min)) * 100 if latest_value < hist_min else 0
-
-                    # Calculate percentage difference from historical absolute max
-                    pct_diff_from_max = ((latest_value - hist_max) / (hist_max-hist_min)) * 100 if latest_value > hist_max else 0
-
-                    percent_changes.append({
-                        'portfolio_id': pid, 'feature': col,
-                        'latest_value': latest_value, 'pct_diff_from_min': pct_diff_from_min,
-                        'pct_diff_from_max': pct_diff_from_max,})
-
-                    if latest_value > hist_max:
-                        pct_diff = ((latest_value / hist_max) - 1) * 100
-                        if pct_diff > perc_diff_thresh:
-                            print("------------------------------------------------------------------------------------------------------------------------")
-                            print(
-                                f"[ALERT] Latest value {latest_value:.4f} for portfolio '{pid}', "
-                                f"feature '{col}' is {pct_diff:.2f}% greater than historical max {hist_max:.4f}."
-                            )
-                            print("------------------------------------------------------------------------------------------------------------------------")
-                    elif latest_value < hist_min:
-                        pct_diff = ((hist_min / latest_value) - 1) * 100
-                        if pct_diff > perc_diff_thresh:
-                            print("------------------------------------------------------------------------------------------------------------------------")
-                            print(
-                                f"[ALERT] Latest value {latest_value:.4f} for portfolio '{pid}', "
-                                f"feature '{col}' is {pct_diff:.2f}% below historical min {hist_min:.4f}."
-                            )
-                            print("------------------------------------------------------------------------------------------------------------------------")
-
-                # ========== Basic Statistics ==========
-                q25 = s.quantile(0.25)
-                q75 = s.quantile(0.75)
-                iqr = q75 - q25
-                q01 = s.quantile(0.01)
-                q99 = s.quantile(0.99)
-                mean_val = s.mean()
-                std_val = s.std()  # sample-based standard deviation
-                cv = std_val / mean_val if mean_val != 0 else np.nan
-                
-                data_range = s.max() - s.min()
-                mad = np.mean(np.abs(s - mean_val))  # mean absolute deviation wrt mean
-                # For the robust approach, we'll use the median-based MAD:
-                median_val = s.median()
-                mad_median = np.median(np.abs(s - median_val))
-                
-                # ========== IQR Outliers ==========
-                lower_bound = q25 - 1.5 * iqr
-                upper_bound = q75 + 1.5 * iqr
-                iqr_outliers = (s < lower_bound) | (s > upper_bound)
-                iqr_outliers_count = iqr_outliers.sum()
-                iqr_outliers_fraction = iqr_outliers_count / len(s)
-                
-                # ========== Standard-Dev Outliers ==========
-                if (std_val > 0) and (std_val < 1.5):
-                    std_outliers = (np.abs(s - mean_val) > std_threshold * std_val)
-                    std_outliers_count = std_outliers.sum()
-                    std_outliers_fraction = std_outliers_count / len(s)
-                else:
-                    # If std_val is 0 or NaN, no std-based outliers
-                    std_outliers_count = 0
-                    std_outliers_fraction = 0.0
-                
-                # ========== Print alerts if outliers found ==========
-                if std_outliers_count > 0:
-                    # print(
-                    #     f"[STD ALERT] {std_outliers_count} / {len(s)} data points for "
-                    #     f"portfolio '{pid}', feature '{col}' exceed {std_threshold} std devs."
-                    # )
-                    continue
-
-                # Collect metrics for this feature
-                metrics_list.append({
-                    'portfolio_id': pid,
-                    'feature': col,
-                    'count': s_count,
-                    'mean': mean_val,
-                    'std': std_val,
-                    'median': median_val,
-                    'mad_median': mad_median,
-                    'min': s.min(),
-                    '1%': q01,
-                    '25%': q25,
-                    '75%': q75,
-                    '99%': q99,
-                    'max': s.max(),
-                    'IQR': iqr,
-                    'range': data_range,
-                    'MAD_mean': mad,  # mean-based absolute deviation
-                    'skewness': s.skew(),
-                    'kurtosis': s.kurtosis(),
-                    'coef_variation': cv,
-                    'perc_missing': (group_recent[col].isna().sum()) / lookback,
-                    'perc_zeros': (s == 0).sum() / len(s),
-                    'perc_unique': s.nunique() / len(s),
-                    'perc_outliers_IQR': iqr_outliers_fraction,
-                    'outliers_std_count': std_outliers_count,
-                    'outliers_std_fraction': std_outliers_fraction
-                })
-        
-        # Save percent changes to BigQuery
-        percent_changes_df = pd.DataFrame(percent_changes)
-        percent_changes_df = sanitize_and_convert_columns(percent_changes_df)
-        percent_changes_df['uuid'] = uuid
-        percent_changes_df['run_date'] = datetime.now()
-        append_to_bigquery(percent_changes_df, DESTINATION_DATASET, f"live_percent_changes_{table_suffix}")
-
-        # Create a DataFrame where each row corresponds to one feature of one ETF
-        df_metrics = pd.DataFrame(metrics_list)
-        return df_metrics
-
-
-    #####################################################################
-    #  8. ROLLING TRAIN/TEST
-    #####################################################################
-
-    # Define lists to collect WW and SHAP analysis results
-    ww_results_list = []
-    shap_results_list = []
-
-    # Main training loop
-    m = feature_array_3d
-    returns = returns_array_2d
-    dates = df_pivoted_returns.index  # Get dates from your pivoted DataFrame
-    uuid = "model=Listfold_" + "__".join(f"{key}={value}" for key, value in args.items())
-
-    all_results = []
-    w = 0
-    porfolio_names = list(np.sort(df_long.portfolio_id.unique()))
-
-    # Conformal prediction variables
-    alpha_list = [0.01, 0.05, 0.1, 0.2, 0.9]  # Adjust as needed
-    mode_top = "single_best"
-    mode_bottom = "single_worst"
-    conformal_results = []
-
-    pd.set_option('display.max_columns', 500)
-    pd.set_option('display.expand_frame_repr', False)  # Prevent line wrapping of columns
-
-    print("End of `df_long` DataFrame")
-    print(tabulate(df_long.tail(1).T, headers='keys', tablefmt='psql'))
-
-    if live_next_day == 1:
-        # --------------------------------------------------
-        # 1) TRAIN ON RECENT HISTORY
-        # --------------------------------------------------
-        # Get last rolling_train_length days for training
-        # shape of m: (total_days, n_assets, n_features)
-        train = copy.deepcopy(m[-(rolling_train_length+1):-1, :, :])
-        train, a = get_preprocess(train)
-
-        # Corresponding returns for the training window
-        ranks_train = returns[-(rolling_train_length+1):-1]
-
-        # --------------------------------------------------
-        # 2) BUILD & TRAIN MODEL (ONE PASS)
-        # --------------------------------------------------
-        model = train__evaluate_listfold_live(train, ranks_train, epochs)
-        
-        # --------------------------------------------------
-        # 3) PREPARE THE "LIVE" DATA (MOST RECENT DAY)
-        # --------------------------------------------------
-        test = copy.deepcopy(m[-1:, :, :])  # the very last slice
-        test = preprocess(test, a)
-
-        device = next(model.parameters()).device
-        features_tensor = torch.from_numpy(test).float().to(device)
-
-        with torch.no_grad():
-            scores_tensor = model(features_tensor)  # shape: (1, n_assets)
-        scores = scores_tensor.cpu().numpy()  # convert to NumPy
-
-        # Convert model scores into a rank ordering
-        # shape(s) -> (n_assets,)
-        predicted_ranks = []
-        for i in range(len(scores)):
-            rank = return_rank(scores[i])  # ascending rank => 0 = best
-            predicted_ranks.append(rank)
-
-        print("LIVE SCORING OUTPUTS:")
-        print("Scores:", scores)
-        print("Predicted Ranks:", predicted_ranks)
-
-
-        # --------------------------------------------------
-        # 4) PREPARE A SMALL DATAFRAME TO SAVE
-        # --------------------------------------------------
-        #   We'll store each portfolio's predicted rank & raw score for the live day,
-        #   plus any other metadata from the run you’d like (e.g., run_date, any args).
-        # --------------------------------------------------
-
-        # The “live” day’s date is presumably the last index in df_pivoted_returns
-        # or equivalently the last day in your data pipeline.
-        live_date = df_pivoted_returns.index[-1]  # Pandas Timestamp
-
-        run_time = datetime.now()
-
-        # Turn results into a list of dict rows
-        bq_live_rows = []
-        for asset_idx, asset_name in enumerate(porfolio_names):
-            bq_live_rows.append({
-                'date':           live_date, 
-                'portfolio_id':   asset_name,
-                'predicted_score': float(scores[0][asset_idx]),
-                'predicted_rank':  int(predicted_ranks[0][asset_idx]),
-                'uuid':           uuid,  # same run-identifier used throughout
-                'run_date':       run_time,
-                'allocation': 7, # n_k-1,
-                # Add run configuration arguments (prefix them with "arg_" to avoid conflicts)
-                # **{f'arg_{k}': v for k, v in vars(args).items()},
-            })
-
-        # Convert to DataFrame
-        bq_live_df = pd.DataFrame(bq_live_rows)
-        bq_live_df = sanitize_and_convert_columns(bq_live_df)  # from your earlier helper
-        print("Live Day Predictions to BQ:")
-        print(bq_live_df.head())
-
-        # --------------------------------------------------
-        # 5) SAVE RESULTS TO BIGQUERY
-        # --------------------------------------------------
-        if is_test > 0:
-            table_suffix = f"{table_suffix}_test"
-
-        append_to_bigquery(
-            df=bq_live_df,
-            dataset_id=DESTINATION_DATASET,
-            table_name=f"live_next_day_predictions_{table_suffix}"
-        )
-
-        print(f"Saved {len(bq_live_df)} live predictions to BigQuery table "
-            f"'live_next_day_predictions_{table_suffix}'.")
-        
-        # Also save the last day
-        df_last_day = sanitize_and_convert_columns(df_last_day)
-        create_or_replace_bigquery_table(
-            df=df_last_day,
-            dataset_id=DESTINATION_DATASET,
-            table_name=f"live_last_day_values_{table_suffix}"
-        )
-        
-        start = time.time()
-        data_metrics_df = compute_nn_data_quality_metrics(df_long, lookback=(rolling_train_length))
-        end = time.time()
-        print(f"Data quality metrics computed in {end - start:.3f} s")
-
-        data_metrics_df['uuid'] = uuid
-        data_metrics_df['run_date'] = datetime.now()
-        append_to_bigquery(data_metrics_df, DESTINATION_DATASET, f"live_data_metrics_{table_suffix}")
-
-        return bq_live_df
-
-
-    for ind, i in enumerate(range(rolling_train_length, len(m), rolling_test_length)):
-        start_time = time.time()  # Start timing for the epoch
-
-        print("Predict period:", w)
-        w += 1
-
-        # Get train/test splits
-        train = copy.deepcopy(m[i-rolling_train_length:i, :, :])
-        test = copy.deepcopy(m[i:i+rolling_test_length, :, :])
-        train, a = get_preprocess(train)
-        test = preprocess(test, a)
-
-        # Get corresponding returns and dates
-        ranks_train = returns[i-rolling_train_length:i]
-        ranks_test = returns[i:i + rolling_test_length]
-        dates_test = dates[i:i + rolling_test_length]  # Get dates for test period
-
-        all_backtests, model = train__evaluate_listfold(train, ranks_train, epochs, test, ranks_test, dates_test)
-        all_results.append(all_backtests)
-
-        loop_time = time.time() - start_time  # Calculate elapsed time for this epoch
-        print(f"Single day {w} training time: {loop_time:.2f} seconds")
-
-        ########################################################################
-        # CONFORMAL PREDICTION 
-        ########################################################################
-        cp_time = time.time()
-
-        (daily_agg_pnl,
-        pos_long_array,
-        pos_short_array,
-        ret_long_array,
-        ret_short_array,
-        pred_ranks_array,   # shape => (rolling_test_length, n_assets)
-        top_k,
-        dates_array,
-        daily_asset_returns, # shape => (rolling_test_length, n_assets)
-        scores_array,
-        loss_value,
-        lookback_loss_value
-        ) = all_backtests[0]
-
-        device = next(model.parameters()).device
-
-        # Move features to torch tensor on device, get model scores
-        features_tensor = torch.from_numpy(train).float().to(device)
-        with torch.no_grad():
-            scores_tensor = model(features_tensor)
-        scores = scores_tensor.cpu().numpy()  # shape: (num_days, n_assets)
-
-        pred_ranks_train_array = return_rank(scores)
-
-        for current_alpha in alpha_list:
-            # 1. Calibrate top threshold using current alpha and mode "single_best"
-            top_threshold = rank_based_conformal_calibrate(
-                true_ranks=ranks_train,
-                pred_ranks=pred_ranks_train_array,
-                alpha=current_alpha,
-                mode=mode_top
-            )
-            
-            # 2. Calibrate bottom threshold using current alpha and mode "single_worst"
-            bottom_threshold = rank_based_conformal_calibrate(
-                true_ranks=ranks_train,
-                pred_ranks=pred_ranks_train_array,
-                alpha=current_alpha,
-                mode=mode_bottom
-            )
-        
-            # 3. Apply thresholds to the test block's predicted ranks
-            top_picks, top_pick_size = rank_based_conformal_apply(
-                pred_ranks_test=pred_ranks_array,
-                threshold=top_threshold,
-                default_k=7,
-                side="top"
-            )
-
-            bottom_picks, bottom_pick_size = rank_based_conformal_apply(
-                pred_ranks_test=pred_ranks_array,
-                threshold=bottom_threshold,
-                default_k=7,
-                side="bottom"
-            )
-        
-            # 4. Save the conformal results for each test day along with the current alpha.
-            for day_idx in range(len(dates_array)):
-                day_date = dates_array[day_idx]
-                top_list = top_picks[day_idx]    # asset indices for top picks
-                bot_list = bottom_picks[day_idx]   # asset indices for bottom picks
-                top_names = [porfolio_names[idx] for idx in top_list]
-                bot_names = [porfolio_names[idx] for idx in bot_list]
-                conformal_results.append({
-                    'rolling_idx': ind,
-                    'date': day_date,
-                    'alpha': current_alpha,
-                    'top_threshold': top_threshold,
-                    'bottom_threshold': bottom_threshold,
-                    # 'top_pick_size': top_pick_size,
-                    # 'bottom_pick_size': bottom_pick_size,
-                    # 'top_list': top_list,
-                    # 'bottom_list': bot_list,
-                    # 'top_names': top_names,
-                    # 'bottom_names': bot_names
-                })
-
-        print(f"Time to complete Conformal Prediction: {(time.time() - cp_time):.2f} seconds")
-
-        ########################################################################
-        # WEIGHTWATCHER ANALYSIS (for each new model)
-        ########################################################################
-        if calculate_ww == 1:
-            ww_time = time.time()
-            ww_analyzer = ww.WeightWatcher(model=model)
-            ww_analysis = ww_analyzer.analyze()
-            ww_df = ww_analysis["details"] if isinstance(ww_analysis, dict) else ww_analysis
-            ww_df = pd.DataFrame(ww_df).reset_index(drop=True)
-
-            ww_df["rolling_idx"] = ind
-            ww_df["uuid"] = uuid
-            ww_df["run_date"] = datetime.now()
-            ww_df['dates'] = str(dates_test.strftime('%Y-%m-%d').tolist())
-
-            ww_df = sanitize_and_convert_columns(ww_df)
-            # Instead of pushing to BigQuery immediately, store the DataFrame in a list.
-            ww_results_list.append(ww_df)
-            print(f"Time to complete WeightWatcher: {time.time() - ww_time:.2f} seconds")
-
-        ########################################################################
-        # SHAP VALUES (for each new model)
-        ########################################################################
-        if calculate_shap == 1: 
-            shap_time = time.time()
-
-            # Compute shap_values with GradientExplainer
-            explainer = shap.GradientExplainer(
-                model,
-                torch.from_numpy(train).float().to(device)
-            )
-            shap_values = explainer.shap_values(
-                torch.from_numpy(test).float().to(device)
-            )
-            # shap_values shape => (1, n_assets, n_features, n_assets)
-
-            # Extract the main array (assume single model output)
-            shap_values_batch = shap_values[0]  # shape (n_assets, n_features, n_assets)
-
-            # Compute overall feature importance across all assets, all outputs
-            abs_shap = np.abs(shap_values_batch)               # shape => (n_assets, n_features, n_assets)
-            mean_abs_per_feature = abs_shap.mean(axis=(0, 2))    # shape (n_features,)
-
-            # Sort and log top features
-            sorted_idx = np.argsort(mean_abs_per_feature)[::-1]
-            top_features = []
-            for rank, idx_f in enumerate(sorted_idx, start=1):
-                top_features.append({
-                    "rank": rank,
-                    "feature": feature_columns[idx_f],
-                    "importance": float(mean_abs_per_feature[idx_f])
-                })
-
-            # Convert to DataFrame and prepare for upload
-            top_features_df = pd.DataFrame(top_features)
-            top_features_df["rolling_idx"] = ind
-            top_features_df["uuid"] = uuid
-            top_features_df["run_date"] = datetime.now()
-            top_features_df['dates'] = str(dates_test.strftime('%Y-%m-%d').tolist())
-
-            top_features_df = sanitize_and_convert_columns(top_features_df)
-            # Instead of calling append_to_bigquery immediately, store the DataFrame.
-            shap_results_list.append(top_features_df)
-            print(f"Time to complete SHAP analysis: {time.time() - shap_time:.2f} seconds")
-
-        # Break if test end met
-        if is_test > 0 and w >= is_test:
-            break
-
-    # After the loop, concatenate and upload the batched results
-    if calculate_ww == 1 and ww_results_list:
-        final_ww_df = pd.concat(ww_results_list, ignore_index=True)
-        append_to_bigquery(final_ww_df, DESTINATION_DATASET, f"weightwatcher_analysis_{table_suffix}")
-        print("Uploaded batch WeightWatcher analysis to BigQuery.")
-
-    if calculate_shap == 1 and shap_results_list:
-        final_shap_df = pd.concat(shap_results_list, ignore_index=True)
-        append_to_bigquery(final_shap_df, DESTINATION_DATASET, f"shap_feature_importance_{table_suffix}")
-        print("Uploaded batch SHAP analysis to BigQuery.")
-
-    if conformal_results:
-        final_cp_df = pd.DataFrame(conformal_results)
-        final_cp_df['run_date'] = datetime.now()
-        final_cp_df['uuid'] = uuid
-        append_to_bigquery(final_cp_df, DESTINATION_DATASET, f"conformal_prediction_{table_suffix}")
-        print("Uploaded batch conformal prediction analysis to BigQuery.")
-
-    ###############################################################################
-    # UPDATED LOGGING & ANALYSIS FOR MULTI-DAY TEST PERIODS
-    ###############################################################################
-
-    # We'll rename variables for clarity:
-    #   daily_agg_pnl: single float per day (the aggregated daily total return)
-    #   daily_asset_returns: shape (n_days, n_assets)
-    #   scores_array: shape (n_days, n_assets)
-    #   etc.
-
-    bq_pred_rows = []
-    for rolling_idx, rolling_results_list in enumerate(all_results):
-        # rolling_results_list: list of "period_results" from backtest(...)
-        #   for each top_k in range(1, n_k)
-        for period_results in rolling_results_list:
-            (
-                daily_agg_pnl,       # shape (rolling_test_length,)
-                pos_long_array,      # shape (rolling_test_length, top_k)
-                pos_short_array,     # shape (rolling_test_length, top_k)
-                ret_long_array,      # shape (rolling_test_length, top_k)
-                ret_short_array,     # shape (rolling_test_length, top_k)
-                pred_ranks_array,    # shape (rolling_test_length, n_assets)
-                top_k,
-                dates_array,         # shape (rolling_test_length,)
-                daily_asset_returns, # shape (rolling_test_length, n_assets)
-                scores_array,        # shape (rolling_test_length, n_assets)
-                loss_value,          # scalar
-                lookback_loss_value  # scalar
-            ) = period_results
-
-            # For each day in the test set
-            for day_idx in range(len(dates_array)):
-                day_date = dates_array[day_idx]
-
-                # The day's per-asset data
-                day_returns = daily_asset_returns[day_idx]  # shape (n_assets,)
-                day_scores  = scores_array[day_idx]         # shape (n_assets,)
-
-                # Convert each to ranks
-                day_actual_ranks = return_rank(day_returns)
-                day_pred_ranks   = return_rank(day_scores)
-
-                # Loop over each asset
-                for asset_idx, asset_name in enumerate(porfolio_names):
-                    bq_pred_rows.append({
-                        'date':          day_date,
-                        'names':         asset_name,
-                        'returns':       day_returns[asset_idx],
-                        'score':         day_scores[asset_idx],
-                        'actual_ranks':  day_actual_ranks[asset_idx],
-                        'pred_ranks':    day_pred_ranks[asset_idx],
-                        # 'top_k':         top_k,
-                        'loss':          loss_value,
-                        'lookback_loss': lookback_loss_value
-                    })
-
-    # Convert to a DataFrame
-    bq_pred_df = pd.DataFrame(bq_pred_rows).drop_duplicates()
-
-    ###############################################################################
-    # Similarly, if you want a day-level df_results (one row per day):
-    ###############################################################################
-    all_dates = []
-    all_daily_agg_pnl = []
-    all_ks = []
-    all_losses = []
-    all_lookback_losses = []
-
-    for rolling_idx, rolling_results_list in enumerate(all_results):
-        for period_results in rolling_results_list:
-            (
-                daily_agg_pnl,       # shape (n_days,)
-                pos_long_array,
-                pos_short_array,
-                ret_long_array,
-                ret_short_array,
-                pred_ranks_array,
-                top_k,
-                dates_array,
-                daily_asset_returns,
-                scores_array,
-                loss_value,
-                lookback_loss_value
-            ) = period_results
-
-            n_days = len(dates_array)
-            all_dates.extend(dates_array.tolist())
-            all_daily_agg_pnl.extend(daily_agg_pnl.tolist())  # aggregated daily PnL
-            all_ks.extend([top_k]*n_days)
-            all_losses.extend([loss_value]*n_days)
-            all_lookback_losses.extend([lookback_loss_value]*n_days)
-
-    df_results = pd.DataFrame({
-        'date': all_dates,
-        'return': all_daily_agg_pnl,  # single daily return across all assets
-        'k': all_ks,
-        'loss': all_losses,
-        'lookback_loss': all_lookback_losses
-    })
-
-    # Sort by date (if desired)
-    df_results = df_results.sort_values('date').reset_index(drop=True)
-
-    # If 'return' above is indeed the daily log return:
-    df_results['simple_return'] = np.exp(df_results['return']) - 1
-
-    def calculate_summary_with_yearly_stats(df_results, args):
-        """
-        Create a summary DataFrame of overall and yearly portfolio statistics.
-
-        All keys from the args dictionary are added to each row with an "arg_" prefix.
-        """
-
-        # ------------------------------------------------------------------------------------------------
-        # ORIGINAL CODE: No changes here
-        # ------------------------------------------------------------------------------------------------
-        df_results['year'] = pd.to_datetime(df_results['date']).dt.year
-        unique_years = sorted(df_results['year'].unique())
-        unique_ks = np.sort(df_results['k'].unique())
-
-        summary_rows = []
-
-        for k in unique_ks:
-            df_k = df_results[df_results['k'] == k].copy().sort_values('date')
-            df_k['portfolio_value'] = 100 * (1 + df_k['simple_return']).cumprod()
-            mean_daily_return = df_k['simple_return'].mean()
-            annualized_return = ((df_k['portfolio_value'].iloc[-1] / 100) ** (252 / len(df_k))) - 1
-            win_rate = (df_k['simple_return'] > 0).mean() * 100
-            rolling_sharpe = df_k['simple_return'].rolling(window=252).apply(
-                lambda x: (x.mean() / x.std()) * np.sqrt(252) if x.std() != 0 else np.nan
-            )
-            std_rolling_sharpe = rolling_sharpe.std()
-            neg_returns = df_k['simple_return'][df_k['simple_return'] < 0]
-            downside_deviation = neg_returns.std() * np.sqrt(252) if len(neg_returns) > 0 else 0
-            sortino_ratio = (mean_daily_return / neg_returns.std()) * np.sqrt(252) if len(neg_returns) > 0 and neg_returns.std() != 0 else np.nan
-            min_drawdown = (df_k['portfolio_value'] / df_k['portfolio_value'].cummax() - 1).min()
-            calmar_ratio = annualized_return / (-min_drawdown) if min_drawdown != 0 else np.nan
-            drawdown = (df_k['portfolio_value'] / df_k['portfolio_value'].cummax() - 1) * 100
-            ulcer_index = np.sqrt(np.mean(drawdown ** 2))
-            wins = df_k['simple_return'][df_k['simple_return'] > 0]
-            losses = df_k['simple_return'][df_k['simple_return'] < 0]
-            avg_win = wins.mean() if len(wins) > 0 else 0
-            avg_loss = losses.abs().mean() if len(losses) > 0 else 0
-            win_loss_ratio = avg_win / avg_loss if avg_loss != 0 else np.inf
-            total_wins = wins.sum() if len(wins) > 0 else 0
-            total_losses = losses.abs().sum() if len(losses) > 0 else 0
-            profit_factor = total_wins / total_losses if total_losses != 0 else np.inf
-            omega_ratio = total_wins / total_losses if total_losses != 0 else np.inf
-            skewness = df_k['simple_return'].skew()
-            kurtosis = df_k['simple_return'].kurtosis()
-            sharpe_ratio = (mean_daily_return / df_k['simple_return'].std()) * np.sqrt(252) if df_k['simple_return'].std() != 0 else np.nan
-
-            # ------------------------------------------------------------------------------------------------
-            # CHANGES: Use negative streaks instead of drawdown periods
-            # ------------------------------------------------------------------------------------------------
-            in_negative = df_k['simple_return'] < 0
-            negative_periods = []
-            current_period = 0
-
-            for is_neg in in_negative:
-                if is_neg:
-                    current_period += 1
-                else:
-                    if current_period > 0:
-                        negative_periods.append(current_period)
-                        current_period = 0
-            if current_period > 0:
-                negative_periods.append(current_period)
-
-            if negative_periods:
-                longest_dd_days = -max(negative_periods)  # negative to match original
-                avg_dd_days = -sum(negative_periods) / len(negative_periods)
-            else:
-                longest_dd_days = 0
-                avg_dd_days = 0
-
-            # Count specific lengths of negative-streak periods
-            dd_3  = sum(1 for x in negative_periods if x == 3)
-            dd_4  = sum(1 for x in negative_periods if x == 4)
-            dd_6  = sum(1 for x in negative_periods if x == 6)
-            dd_7  = sum(1 for x in negative_periods if x == 7)
-            dd_8  = sum(1 for x in negative_periods if x == 8)
-            dd_9  = sum(1 for x in negative_periods if x == 9)
-            dd_10 = sum(1 for x in negative_periods if x == 10)
-            dd_10_plus = sum(1 for x in negative_periods if x > 10)
-
-            # ------------------------------------------------------------------------------------------------
-            # CHANGES: ADDED 30, 60, 120 day portfolio volatility, returns, and Sharpe
-            # ------------------------------------------------------------------------------------------------
-            def lookback_metrics(period):
-                if len(df_k) < period:
-                    return (np.nan, np.nan, np.nan, np.nan, np.nan)  
-                lookback_returns = df_k['simple_return'].iloc[-period:]
-
-                # daily average & standard deviation over the window
-                avg_return = lookback_returns.mean() * 100
-                std_return = lookback_returns.std() * 100
-
-                # total return, annualized volatility, sharpe as before
-                total_return = (df_k['portfolio_value'].iloc[-1] / df_k['portfolio_value'].iloc[-period] - 1) * 100
-                vol = lookback_returns.std() * np.sqrt(252) * 100
-                sharpe = (lookback_returns.mean() / lookback_returns.std()) * np.sqrt(252) if lookback_returns.std() != 0 else np.nan
-                return avg_return, std_return, total_return, vol, sharpe
-
-            avg_30, std_30, ret_30, vol_30, sharpe_30 = lookback_metrics(30)
-            avg_60, std_60, ret_60, vol_60, sharpe_60 = lookback_metrics(60)
-            avg_120, std_120, ret_120, vol_120, sharpe_120 = lookback_metrics(120)
-
-            # Overall daily average & daily std
-            overall_avg_daily = df_k['simple_return'].mean() * 100
-            overall_std_daily = df_k['simple_return'].std() * 100
-
-            # ------------------------------------------------------------------------------------------------
-            # ORIGINAL CODE: No changes, except for storing new fields in row
-            # ------------------------------------------------------------------------------------------------
-            var_95 = np.percentile(df_k['simple_return'], 5)
-            daily_var = var_95 * 100
-            df_k['year_month'] = pd.to_datetime(df_k['date']).dt.to_period('M')
-            monthly_returns = df_k.groupby('year_month')['simple_return'].apply(
-                lambda x: (1 + x).prod() - 1
-            )
-            worst_month_perf = monthly_returns.min() * 100 if not monthly_returns.empty else 0
-
-            row = {
-                'Ranks Predicted': k,
-                'Average Loss': df_k['loss'].mean(),
-                'Average Lookback Loss': df_k['loss'][-60:].mean(),
-                'Total Return (%)': (df_k['portfolio_value'].iloc[-1] / 100 - 1) * 100,
-                'Annualized Return (%)': annualized_return * 100,
-                'Annualized Volatility (%)': np.sqrt(252) * df_k['simple_return'].std() * 100,
-                'Sharpe Ratio': sharpe_ratio,
-                'Max Drawdown (%)': min_drawdown * 100,
-                'Win Rate (%)': win_rate,
-                'Std of Rolling Sharpe': std_rolling_sharpe,
-                'Sortino Ratio': sortino_ratio,
-                'Calmar Ratio': calmar_ratio,
-                'Ulcer Index': ulcer_index,
-                'Win/Loss Ratio': win_loss_ratio,
-                'Profit Factor': profit_factor,
-                'Omega Ratio': omega_ratio,
-                'Skewness': skewness,
-                'Kurtosis': kurtosis,
-                'Longest DD Days': longest_dd_days,
-                'Daily VaR': daily_var,
-                'Avg Drawdown Days': avg_dd_days,
-                'Worst Month Perf %': worst_month_perf,
-
-                # CHANGES: NEW FIELDS FOR LOOKBACK VOL, RETURN, SHARPE
-                'Overall Avg Return (%)': overall_avg_daily,   # NEW
-                'Overall Std Dev (%)': overall_std_daily,      # NEW
-
-                '30d Avg Return (%)': avg_30,                  # NEW
-                '30d Std Dev (%)': std_30,                     # NEW
-                '30d Ret (%)': ret_30,
-                '30d Vol (%)': vol_30,
-                '30d Sharpe': sharpe_30,
-
-                '60d Avg Return (%)': avg_60,                  # NEW
-                '60d Std Dev (%)': std_60,                     # NEW
-                '60d Ret (%)': ret_60,
-                '60d Vol (%)': vol_60,
-                '60d Sharpe': sharpe_60,
-
-                '120d Avg Return (%)': avg_120,                # NEW
-                '120d Std Dev (%)': std_120,                   # NEW
-                '120d Ret (%)': ret_120,
-                '120d Vol (%)': vol_120,
-                '120d Sharpe': sharpe_120,
-
-                # CHANGES: DRAWDOWN PERIOD COUNTS
-                'DD_Count_3': dd_3,
-                'DD_Count_4': dd_4,
-                'DD_Count_6': dd_6,
-                'DD_Count_7': dd_7,
-                'DD_Count_8': dd_8,
-                'DD_Count_9': dd_9,
-                'DD_Count_10': dd_10,
-                'DD_Count_10plus': dd_10_plus,
-
-                'UUID': uuid
-            }
-
-            for year in unique_years:
-                df_year = df_k[df_k['year'] == year].copy()
-                df_year['year_month'] = pd.to_datetime(df_k['date']).dt.to_period('M')
-                df_year['year_month'] = pd.to_datetime(df_k['date']).dt.to_period('M')
-                year_monthly_returns = df_year.groupby('year_month')['simple_return'].apply(
-                    lambda x: (1 + x).prod() - 1
-                )
-                worst_year_month_perf = year_monthly_returns.min() * 100 if not year_monthly_returns.empty else 0
-
-                if not df_year.empty:
-                    mean_daily_return_year = df_year['simple_return'].mean()
-                    start_value = df_year['portfolio_value'].iloc[0]
-                    end_value = df_year['portfolio_value'].iloc[-1]
-                    yearly_return = (end_value / start_value) - 1
-                    yearly_volatility = np.sqrt(252) * df_year['simple_return'].std()
-                    yearly_max_drawdown = (df_year['portfolio_value'] / df_year['portfolio_value'].cummax() - 1).min()
-                    yearly_win_rate = (df_year['simple_return'] > 0).mean() * 100
-                    neg_returns_year = df_year['simple_return'][df_year['simple_return'] < 0]
-                    yearly_downside_deviation = neg_returns_year.std() * np.sqrt(252) if len(neg_returns_year) > 0 else 0
-                    yearly_sortino = (mean_daily_return_year / neg_returns_year.std()) * np.sqrt(252) if len(neg_returns_year) > 0 and neg_returns_year.std() != 0 else np.nan
-                    yearly_calmar = yearly_return / (-yearly_max_drawdown) if yearly_max_drawdown != 0 else np.nan
-                    yearly_drawdowns = (df_year['portfolio_value'] / df_year['portfolio_value'].cummax() - 1) * 100
-                    yearly_ulcer_index = np.sqrt(np.mean(yearly_drawdowns ** 2))
-                    wins_year = df_year['simple_return'][df_year['simple_return'] > 0]
-                    losses_year = df_year['simple_return'][df_year['simple_return'] < 0]
-                    avg_win_year = wins_year.mean() if len(wins_year) > 0 else 0
-                    avg_loss_year = losses_year.abs().mean() if len(losses_year) > 0 else 0
-                    win_loss_ratio_year = avg_win_year / avg_loss_year if avg_loss_year != 0 else np.inf
-                    total_wins_year = wins_year.sum() if len(wins_year) > 0 else 0
-                    total_losses_year = losses_year.abs().sum() if len(losses_year) > 0 else 0
-                    profit_factor_year = total_wins_year / total_losses_year if total_losses_year != 0 else np.inf
-                    omega_ratio_year = total_wins_year / total_losses_year if total_losses_year != 0 else np.inf
-                    skewness_year = df_year['simple_return'].skew()
-                    kurtosis_year = df_year['simple_return'].kurtosis()
-                    yearly_sharpe = (mean_daily_return_year / df_year['simple_return'].std()) * np.sqrt(252) if df_year['simple_return'].std() != 0 else np.nan
-
-                    row.update({
-                        f'{year}_Return (%)': yearly_return * 100,
-                        f'{year}_Volatility (%)': yearly_volatility * 100,
-                        f'{year}_Sharpe': yearly_sharpe,
-                        f'{year}_Max Drawdown (%)': yearly_max_drawdown * 100,
-                        f'{year}_Avg_Loss': df_year['loss'].mean(),
-                        f'{year}_Avg_Lookback_Loss': df_year['loss'][-30:].mean(),
-                        f'{year}_Win_Rate (%)': yearly_win_rate,
-                        f'{year}_Sortino_Ratio': yearly_sortino,
-                        f'{year}_Calmar_Ratio': yearly_calmar,
-                        f'{year}_Ulcer_Index': yearly_ulcer_index,
-                        f'{year}_Win_Loss_Ratio': win_loss_ratio_year,
-                        f'{year}_Profit_Factor': profit_factor_year,
-                        f'{year}_Omega_Ratio': omega_ratio_year,
-                        f'{year}_Skewness': skewness_year,
-                        f'{year}_Kurtosis': kurtosis_year,
-                        f'{year}_Worst_Month_Perf%': worst_year_month_perf
-                    })
-
-            for key, value in args.items():
-                row[f'arg_{key}'] = value
-
-            summary_rows.append(row)
-
-        summary_df = pd.DataFrame(summary_rows)
-
-        # ------------------------------------------------------------------------------------------------
-        # ORIGINAL CODE: Just adding new columns to the base_cols
-        # ------------------------------------------------------------------------------------------------
-        base_cols = [
-            'Ranks Predicted', 'Average Loss', 'Average Lookback Loss',
-            'Total Return (%)', 'Annualized Return (%)', 'Annualized Volatility (%)',
-            'Sharpe Ratio', 'Max Drawdown (%)', 'Win Rate (%)', 'Std of Rolling Sharpe',
-            'Sortino Ratio', 'Calmar Ratio', 'Ulcer Index', 'Win/Loss Ratio',
-            'Profit Factor', 'Omega Ratio', 'Skewness', 'Kurtosis',
-            'Longest DD Days', 'Daily VaR', 'Avg Drawdown Days', 'Worst Month Perf %',
-
-            # New overall average & std
-            'Overall Avg Return (%)', 'Overall Std Dev (%)',
-
-            # 30d
-            '30d Avg Return (%)', '30d Std Dev (%)', '30d Ret (%)', '30d Vol (%)', '30d Sharpe',
-
-            # 60d
-            '60d Avg Return (%)', '60d Std Dev (%)', '60d Ret (%)', '60d Vol (%)', '60d Sharpe',
-
-            # 120d
-            '120d Avg Return (%)', '120d Std Dev (%)', '120d Ret (%)', '120d Vol (%)', '120d Sharpe',
-
-            'DD_Count_3', 'DD_Count_4', 'DD_Count_6', 'DD_Count_7', 'DD_Count_8',
-            'DD_Count_9', 'DD_Count_10', 'DD_Count_10plus'
-        ]
-        year_cols = sorted(
-            [col for col in summary_df.columns
-            if col.split('_')[0].isdigit() and len(col.split('_')[0]) == 4],
-            key=lambda x: (int(x.split('_')[0]), x)
-        )
-        args_cols = sorted([col for col in summary_df.columns if col.startswith('arg_')])
-
-        summary_df = summary_df[base_cols + year_cols + args_cols + ['UUID']]
-
-        return summary_df
-
-    # Sort by date
-    df_results = df_results.sort_values('date').reset_index(drop=True)
-
-    # Convert log returns to simple returns
-    df_results['simple_return'] = np.exp(df_results['return']) - 1
-
-    # Use in the main code:
-    summary_df = calculate_summary_with_yearly_stats(
-        df_results, args = args
-
+    # ─── 4. Scale ────────────────────────────────────────────────────────────────
+    scaler = StandardScaler().fit(X_train)
+    X_train = pd.DataFrame(
+        scaler.transform(X_train),
+        index=X_train.index,
+        columns=X_train.columns
     )
+    X_test = pd.DataFrame(
+        scaler.transform(X_test),
+        index=X_test.index,
+        columns=X_test.columns
+    )
+
+    # ─── 5. Prune on TRAIN (corr → MI) ───────────────────────────────────────────
+    X_train = mi_screen(
+        correlation_prune(X_train, CORR_THRESHOLD),
+        y_train,
+        MI_THRESHOLD
+    )
+
+    # apply the *same* selected features to TEST
+    X_test = X_test[X_train.columns]
+
+    # standardise *after* the split
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler().fit(X_train)
+    X_train = scaler.transform(X_train)
+    X_test  = scaler.transform(X_test)
+
+    # -------------------- 3.  Base models (all *classification*) -----
+    from catboost import CatBoostClassifier
+    from lightgbm import LGBMClassifier
+    from xgboost import XGBClassifier
+
+
+    models = {
+        "CatBoost" : CatBoostClassifier(
+            loss_function="Logloss",
+            random_seed=42,
+            task_type="CPU",
+            depth=8,
+            learning_rate=0.03,
+            iterations=800,
+            verbose=False
+        ),
+        "LightGBM" : LGBMClassifier(
+            objective="binary",
+            boosting_type="dart",
+            learning_rate=0.02,
+            drop_rate=0.2,
+            subsample=0.8,
+            feature_fraction=0.8,
+            max_depth=-1,
+            device="cpu",
+            seed=42,
+            n_estimators=800
+        ),
+        "XGBoost": XGBClassifier(
+            objective="binary:logistic",
+            n_estimators=1000,
+            learning_rate=0.01,
+            tree_method="hist",       # GPU‑accelerated histogram algorithm
+            # predictor="gpu_predictor",    # GPU for prediction, too
+            # gpu_id=0,                     # which GPU to use
+            # use_label_encoder=False,      # disable legacy label encoder
+            verbosity=0,                  # silent
+            random_state=42,
+            device="cpu"
+        ),
+        "XGBoost2": XGBClassifier(
+        objective="binary:logistic",
+        # -------------------
+        # Core boosting
+        n_estimators=2000,          # more rounds to compensate for stronger regularization
+        learning_rate=0.01,         # slightly higher than 0.005 to converge faster
+        # -------------------
+        # Tree complexity
+        max_depth=8,                # capture richer patterns, but not too deep
+        min_child_weight=5,         # minimum sum hessian in leaf to avoid over‑fitting small samples
+        gamma=1.0,                  # require a 1.0 loss reduction to make a split
+        # -------------------
+        # Randomness for bagging
+        subsample=0.8,              # row subsampling per tree
+        colsample_bytree=0.8,       # feature subsampling per tree
+        # -------------------
+        # Regularization
+        reg_alpha=0.1,              # L1 regularization
+        reg_lambda=1.0,             # L2 regularization
+        # -------------------
+        # GPU settings
+        tree_method="hist",
+        # predictor="gpu_predictor",
+        # gpu_id=0,
+        # -------------------
+        # Misc
+        # use_label_encoder=False,
+        eval_metric="auc",          # optimize for area‑under‑ROC
+        random_state=42,
+        verbosity=1,
+        device="cpu"
+    ),
+        "XGBoost3": XGBClassifier(
+        objective="binary:logistic",
+        # -------------------
+        # Core boosting
+        n_estimators=2000,          # more rounds to compensate for stronger regularization
+        learning_rate=0.01,         # slightly higher than 0.005 to converge faster
+        # -------------------
+        # Tree complexity
+        max_depth=8,                # capture richer patterns, but not too deep
+        min_child_weight=5,         # minimum sum hessian in leaf to avoid over‑fitting small samples
+        gamma=1.0,                  # require a 1.0 loss reduction to make a split
+        # -------------------
+        # Randomness for bagging
+        subsample=0.8,              # row subsampling per tree
+        colsample_bytree=0.8,       # feature subsampling per tree
+        # -------------------
+        # Regularization
+        reg_alpha=0.1,              # L1 regularization
+        reg_lambda=1.0,             # L2 regularization
+        # -------------------
+        # GPU settings
+        tree_method="hist",
+        # predictor="gpu_predictor",
+        # gpu_id=0,
+        # -------------------
+        # Misc
+        # use_label_encoder=False,
+        eval_metric="auc",          # optimize for area‑under‑ROC
+        random_state=42,
+        verbosity=1,
+        device="cpu"
+    ),
+        "XGBoost4": XGBClassifier(
+        objective="binary:logistic",
+        # -------------------
+        # Core boosting
+        n_estimators=2000,          # more rounds to compensate for stronger regularization
+        learning_rate=0.001,         # slightly higher than 0.005 to converge faster
+        # -------------------
+        # Tree complexity
+        max_depth=18,                # capture richer patterns, but not too deep
+        min_child_weight=5,         # minimum sum hessian in leaf to avoid over‑fitting small samples
+        gamma=1.0,                  # require a 1.0 loss reduction to make a split
+        # -------------------
+        # Randomness for bagging
+        subsample=0.9,              # row subsampling per tree
+        colsample_bytree=0.9,       # feature subsampling per tree
+        # -------------------
+        # Regularization
+        reg_alpha=0.1,              # L1 regularization
+        reg_lambda=1.0,             # L2 regularization
+        # -------------------
+        # GPU settings
+        tree_method="hist",
+        # predictor="gpu_predictor",
+        # gpu_id=0,
+        # -------------------
+        # Misc
+        # use_label_encoder=False,
+        eval_metric="auc",          # optimize for area‑under‑ROC
+        random_state=42,
+        verbosity=1,
+        device="cpu"
+    ),
+    }
+
+    for name, mdl in models.items():
+        mdl.fit(X_train, y_train)
+        print(f"{name} fitted")
+
+    # -------------------- 4. Simple equal‑weight ensemble ------------
+    import numpy as np
+    probas = np.column_stack([m.predict_proba(X_test)[:,1] for m in models.values()])
+    y_pred_proba = probas.mean(axis=1)                         # ensemble probability
+    y_pred       = (y_pred_proba >= 0.5).astype(int)           # hard class
+
+
+    ###################################################################################
+    # 4. Evaluate the model performance
+    ###################################################################################
+
+    uuid = str(pd.Timestamp.now()) + "__model=Meta_Model__" + "__".join(f"{key}={value}" for key, value in args.items())
+    
+    # -------------------- 5.  Classification metrics -----------------
+    from sklearn.metrics import (accuracy_score, precision_score, recall_score,
+                                f1_score, roc_auc_score, brier_score_loss,
+                                confusion_matrix, roc_curve,
+                                precision_recall_curve)
+    from sklearn.calibration import calibration_curve
+
+    accuracy  = accuracy_score (y_test, y_pred)
+    precision = precision_score(y_test, y_pred)
+    recall    = recall_score   (y_test, y_pred)
+    f1        = f1_score       (y_test, y_pred)
+    roc_auc   = roc_auc_score  (y_test, y_pred_proba)
+    brier     = brier_score_loss(y_test, y_pred_proba)
+
+    print(f"Accuracy : {accuracy :.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall   : {recall   :.4f}")
+    print(f"F1 score : {f1       :.4f}")
+    print(f"ROC AUC  : {roc_auc  :.4f}")
+    print(f"Brier    : {brier    :.4f}")
+
+    print("Confusion matrix:\n", confusion_matrix(y_test, y_pred))
+
+    metrics_df = pd.DataFrame([{"accuracy":accuracy, "precision":precision, "recall":recall, "f1":f1, "roc_auc":roc_auc, "brier": brier, 'uuid':uuid}])
+
+    # -------------------- 6.  Diagnostic plots -----------------------
+    import matplotlib.pyplot as plt
+
+    # a) Confusion‑matrix heat‑map
+    cm = confusion_matrix(y_test, y_pred)
+    confusion_matrix_plot = plt.figure(figsize=(6,4))
+    plt.imshow(cm, interpolation="nearest")
+    plt.title("Confusion Matrix")
+    plt.colorbar()
+    tick = np.arange(2)
+    plt.xticks(tick, ["Negative","Positive"])
+    plt.yticks(tick, ["Negative","Positive"])
+    for i in range(2):
+        for j in range(2):
+            plt.text(j, i, cm[i,j], ha="center", va="center",
+                    color="white" if cm[i,j] > cm.max()/2 else "black")
+    plt.xlabel("Predicted label")
+    plt.ylabel("True label")
+    plt.show()
+
+
+    # b) ROC curve
+    fpr, tpr, _ = roc_curve(y_test, y_pred_proba)
+    roc_plot = plt.figure(figsize=(6,4))
+    plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.4f}")
+    plt.plot([0,1],[0,1], linestyle="--", label="Chance")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC Curve")
+    plt.legend(); plt.show()
+
+    # c) Precision‑Recall curve
+    prec, rec, _ = precision_recall_curve(y_test, y_pred_proba)
+    precision_recall_plot = plt.figure(figsize=(6,4))
+    plt.plot(rec, prec)
+    plt.xlabel("Recall"); plt.ylabel("Precision"); plt.title("Precision‑Recall Curve")
+    plt.show()
+
+    # d) Calibration curve
+    prob_true, prob_pred = calibration_curve(y_test, y_pred_proba, n_bins=10)
+    calibration_curve_plot = plt.figure(figsize=(6,4))
+    plt.plot(prob_pred, prob_true, marker="o")
+    plt.plot([0,1],[0,1], linestyle="--")
+    plt.xlabel("Mean Predicted Probability")
+    plt.ylabel("Fraction of Positives")
+    plt.title("Calibration Curve")
+    plt.show()
+
+    # e) Histogram of predicted probabilities
+    predicted_porbability_plot = plt.figure(figsize=(6,4))
+    plt.hist(y_pred_proba, bins=20, edgecolor="k")
+    plt.xlabel("Predicted probability"); plt.ylabel("Frequency")
+    plt.title("Distribution of Predicted Probabilities")
+    plt.show()
+    
 
     ###############################################################################
     # 4) Plot cumulative portfolio value for each k
     ###############################################################################
-    unique_ks = np.sort(df_results['k'].unique())
-    performance_fig = plt.figure(figsize=(15, 8))
-
-    colors = plt.cm.viridis(np.linspace(0, 1, len(unique_ks)))
-
-    for idx, k_val in enumerate(unique_ks):
-        df_k = df_results[df_results['k'] == k_val].copy()
-        df_k = df_k.sort_values('date')
-        # Multiply up from 100
-        df_k['portfolio_value'] = 100 * (1 + df_k['simple_return']).cumprod()
-
-        plt.plot(df_k['date'], df_k['portfolio_value'],
-                label=f'K={k_val}',
-                color=colors[idx],
-                linewidth=2)
-
-    plt.title('Portfolio Value Over Time by K Configuration\n($100 Initial Investment)')
-    plt.xlabel('Date')
-    plt.ylabel('Portfolio Value ($)')
-    plt.grid(True, alpha=0.3)
-    plt.legend(title='Configuration', bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.xticks(rotation=45)
-    plt.tight_layout()
+    
 
     def generate_file_name(config_dict, file_type, extension):
         """Generate filename with UUID"""
