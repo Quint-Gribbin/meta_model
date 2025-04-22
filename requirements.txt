@@ -118,3 +118,4 @@ dask
 catboost
 openpyxl
 lightgbm
+xgboost
