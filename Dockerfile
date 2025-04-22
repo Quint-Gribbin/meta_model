@@ -1,4 +1,4 @@
-FROM gcr.io/deeplearning-platform-release/pytorch-cpu.1-12:latest
+FROM gcr.io/deeplearning-platform-release/xgboost-cpu:latest
 
 # Install additional Python dependencies
 COPY requirements.txt .
