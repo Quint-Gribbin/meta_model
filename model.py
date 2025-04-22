@@ -2585,3 +2585,7 @@ def main(rolling_train_length=2100,
     save_performance_figure_to_gcs(precision_recall_plot, STAGING_BUCKET, f"{file_prefix}_precision_recall_plot.png")
     save_performance_figure_to_gcs(calibration_curve_plot, STAGING_BUCKET, f"{file_prefix}_calibration_curve.png")
     save_performance_figure_to_gcs(predicted_probability_plot, STAGING_BUCKET, f"{file_prefix}_predicted_probability.png")
+
+if __name__ == "__main__":
+    # put any one‑off code or calls to your main() function here
+    main()
