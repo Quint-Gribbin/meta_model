@@ -4,7 +4,7 @@ def main():
     import argparse
     import subprocess
     # from model import main as train_main_function
-    from model_345pm import main as train_main_function
+    from model import main as train_main_function
 
     # Google Cloud imports
     from google.cloud import bigquery, storage
@@ -203,6 +203,11 @@ def main():
                     type=int,
                     default=1,
                     help='How long to lag the returns') 
+        
+        parser.add_argument('--core-model-column',
+            type=str,
+            default="long_return",
+            help='Which returns to select from core model') 
 
         args = parser.parse_args()
         return args
@@ -247,6 +252,7 @@ def main():
     factor_lag = args.factor_lag
     live_next_day = args.live_next_day
     return_lag = args.return_lag
+    core_model_column = args.core_model_column
 
     train_main_function(
         rolling_train_length=rolling_train_length,
@@ -283,6 +289,7 @@ def main():
         live_next_day=live_next_day,
         is_test=is_test,
         return_lag=return_lag,
+        core_model_column=core_model_column
     )
 
 if __name__ == "__main__":
