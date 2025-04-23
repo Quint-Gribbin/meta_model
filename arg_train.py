@@ -209,6 +209,11 @@ def main():
             default="long_return",
             help='Which returns to select from core model') 
 
+        parser.add_argument('--l0-config',
+            type=str,
+            default="base",
+            help='Which returns to select from core model') 
+
         args = parser.parse_args()
         return args
 
@@ -253,6 +258,7 @@ def main():
     live_next_day = args.live_next_day
     return_lag = args.return_lag
     core_model_column = args.core_model_column
+    l0_config = args.l0_config
 
     train_main_function(
         rolling_train_length=rolling_train_length,
@@ -289,7 +295,8 @@ def main():
         live_next_day=live_next_day,
         is_test=is_test,
         return_lag=return_lag,
-        core_model_column=core_model_column
+        core_model_column=core_model_column,
+        l0_config=l0_config
     )
 
 if __name__ == "__main__":
