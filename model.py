@@ -34,7 +34,6 @@ def main(rolling_train_length=2100,
         cluster_df=0,
         return_lag=1,
         core_model_column="long_return",
-
 ):
     args = locals().copy()
     args.pop("cluster_df")
