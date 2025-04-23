@@ -34,6 +34,7 @@ def main(rolling_train_length=2100,
         cluster_df=0,
         return_lag=1,
         core_model_column="long_return",
+        l0_config="base",
 ):
     args = locals().copy()
     args.pop("cluster_df")
@@ -2077,139 +2078,383 @@ def main(rolling_train_length=2100,
     from catboost import CatBoostClassifier
     from lightgbm import LGBMClassifier
     from xgboost import XGBClassifier
+    from sklearn.ensemble import ExtraTreesClassifier
+    from sklearn.linear_model import LogisticRegression
 
-
-    models = {
-        "CatBoost" : CatBoostClassifier(
-            loss_function="Logloss",
-            random_seed=42,
-            task_type="CPU",
-            depth=8,
-            learning_rate=0.03,
-            iterations=800,
-            verbose=False
-        ),
-        "LightGBM" : LGBMClassifier(
-            objective="binary",
-            boosting_type="dart",
-            learning_rate=0.02,
-            drop_rate=0.2,
-            subsample=0.8,
-            feature_fraction=0.8,
-            max_depth=-1,
-            device="cpu",
-            seed=42,
-            n_estimators=800
-        ),
-        "XGBoost": XGBClassifier(
+    if l0_config == 'base':
+        models = {
+            "CatBoost" : CatBoostClassifier(
+                loss_function="Logloss",
+                random_seed=42,
+                task_type="CPU",
+                depth=8,
+                learning_rate=0.03,
+                iterations=800,
+                verbose=False
+            ),
+            "LightGBM" : LGBMClassifier(
+                objective="binary",
+                boosting_type="dart",
+                learning_rate=0.02,
+                drop_rate=0.2,
+                subsample=0.8,
+                feature_fraction=0.8,
+                max_depth=-1,
+                device="cpu",
+                seed=42,
+                n_estimators=800
+            ),
+            "XGBoost": XGBClassifier(
+                objective="binary:logistic",
+                n_estimators=1000,
+                learning_rate=0.01,
+                tree_method="hist",       # GPU‑accelerated histogram algorithm
+                # predictor="gpu_predictor",    # GPU for prediction, too
+                # gpu_id=0,                     # which GPU to use
+                # use_label_encoder=False,      # disable legacy label encoder
+                verbosity=0,                  # silent
+                random_state=42,
+                device="cpu"
+            ),
+            "XGBoost2": XGBClassifier(
             objective="binary:logistic",
-            n_estimators=1000,
-            learning_rate=0.01,
-            tree_method="hist",       # GPU‑accelerated histogram algorithm
-            # predictor="gpu_predictor",    # GPU for prediction, too
-            # gpu_id=0,                     # which GPU to use
-            # use_label_encoder=False,      # disable legacy label encoder
-            verbosity=0,                  # silent
+            # -------------------
+            # Core boosting
+            n_estimators=2000,          # more rounds to compensate for stronger regularization
+            learning_rate=0.01,         # slightly higher than 0.005 to converge faster
+            # -------------------
+            # Tree complexity
+            max_depth=8,                # capture richer patterns, but not too deep
+            min_child_weight=5,         # minimum sum hessian in leaf to avoid over‑fitting small samples
+            gamma=1.0,                  # require a 1.0 loss reduction to make a split
+            # -------------------
+            # Randomness for bagging
+            subsample=0.8,              # row subsampling per tree
+            colsample_bytree=0.8,       # feature subsampling per tree
+            # -------------------
+            # Regularization
+            reg_alpha=0.1,              # L1 regularization
+            reg_lambda=1.0,             # L2 regularization
+            # -------------------
+            # GPU settings
+            tree_method="hist",
+            # predictor="gpu_predictor",
+            # gpu_id=0,
+            # -------------------
+            # Misc
+            # use_label_encoder=False,
+            eval_metric="auc",          # optimize for area‑under‑ROC
             random_state=42,
+            verbosity=1,
             device="cpu"
         ),
-        "XGBoost2": XGBClassifier(
-        objective="binary:logistic",
-        # -------------------
-        # Core boosting
-        n_estimators=2000,          # more rounds to compensate for stronger regularization
-        learning_rate=0.01,         # slightly higher than 0.005 to converge faster
-        # -------------------
-        # Tree complexity
-        max_depth=8,                # capture richer patterns, but not too deep
-        min_child_weight=5,         # minimum sum hessian in leaf to avoid over‑fitting small samples
-        gamma=1.0,                  # require a 1.0 loss reduction to make a split
-        # -------------------
-        # Randomness for bagging
-        subsample=0.8,              # row subsampling per tree
-        colsample_bytree=0.8,       # feature subsampling per tree
-        # -------------------
-        # Regularization
-        reg_alpha=0.1,              # L1 regularization
-        reg_lambda=1.0,             # L2 regularization
-        # -------------------
-        # GPU settings
-        tree_method="hist",
-        # predictor="gpu_predictor",
-        # gpu_id=0,
-        # -------------------
-        # Misc
-        # use_label_encoder=False,
-        eval_metric="auc",          # optimize for area‑under‑ROC
-        random_state=42,
-        verbosity=1,
-        device="cpu"
-    ),
-        "XGBoost3": XGBClassifier(
-        objective="binary:logistic",
-        # -------------------
-        # Core boosting
-        n_estimators=2000,          # more rounds to compensate for stronger regularization
-        learning_rate=0.01,         # slightly higher than 0.005 to converge faster
-        # -------------------
-        # Tree complexity
-        max_depth=8,                # capture richer patterns, but not too deep
-        min_child_weight=5,         # minimum sum hessian in leaf to avoid over‑fitting small samples
-        gamma=1.0,                  # require a 1.0 loss reduction to make a split
-        # -------------------
-        # Randomness for bagging
-        subsample=0.8,              # row subsampling per tree
-        colsample_bytree=0.8,       # feature subsampling per tree
-        # -------------------
-        # Regularization
-        reg_alpha=0.1,              # L1 regularization
-        reg_lambda=1.0,             # L2 regularization
-        # -------------------
-        # GPU settings
-        tree_method="hist",
-        # predictor="gpu_predictor",
-        # gpu_id=0,
-        # -------------------
-        # Misc
-        # use_label_encoder=False,
-        eval_metric="auc",          # optimize for area‑under‑ROC
-        random_state=42,
-        verbosity=1,
-        device="cpu"
-    ),
-        "XGBoost4": XGBClassifier(
-        objective="binary:logistic",
-        # -------------------
-        # Core boosting
-        n_estimators=2000,          # more rounds to compensate for stronger regularization
-        learning_rate=0.001,         # slightly higher than 0.005 to converge faster
-        # -------------------
-        # Tree complexity
-        max_depth=18,                # capture richer patterns, but not too deep
-        min_child_weight=5,         # minimum sum hessian in leaf to avoid over‑fitting small samples
-        gamma=1.0,                  # require a 1.0 loss reduction to make a split
-        # -------------------
-        # Randomness for bagging
-        subsample=0.9,              # row subsampling per tree
-        colsample_bytree=0.9,       # feature subsampling per tree
-        # -------------------
-        # Regularization
-        reg_alpha=0.1,              # L1 regularization
-        reg_lambda=1.0,             # L2 regularization
-        # -------------------
-        # GPU settings
-        tree_method="hist",
-        # predictor="gpu_predictor",
-        # gpu_id=0,
-        # -------------------
-        # Misc
-        # use_label_encoder=False,
-        eval_metric="auc",          # optimize for area‑under‑ROC
-        random_state=42,
-        verbosity=1,
-        device="cpu"
-    ),
-    }
+            "XGBoost3": XGBClassifier(
+            objective="binary:logistic",
+            # -------------------
+            # Core boosting
+            n_estimators=2000,          # more rounds to compensate for stronger regularization
+            learning_rate=0.01,         # slightly higher than 0.005 to converge faster
+            # -------------------
+            # Tree complexity
+            max_depth=8,                # capture richer patterns, but not too deep
+            min_child_weight=5,         # minimum sum hessian in leaf to avoid over‑fitting small samples
+            gamma=1.0,                  # require a 1.0 loss reduction to make a split
+            # -------------------
+            # Randomness for bagging
+            subsample=0.8,              # row subsampling per tree
+            colsample_bytree=0.8,       # feature subsampling per tree
+            # -------------------
+            # Regularization
+            reg_alpha=0.1,              # L1 regularization
+            reg_lambda=1.0,             # L2 regularization
+            # -------------------
+            # GPU settings
+            tree_method="hist",
+            # predictor="gpu_predictor",
+            # gpu_id=0,
+            # -------------------
+            # Misc
+            # use_label_encoder=False,
+            eval_metric="auc",          # optimize for area‑under‑ROC
+            random_state=42,
+            verbosity=1,
+            device="cpu"
+        ),
+            "XGBoost4": XGBClassifier(
+            objective="binary:logistic",
+            # -------------------
+            # Core boosting
+            n_estimators=2000,          # more rounds to compensate for stronger regularization
+            learning_rate=0.001,         # slightly higher than 0.005 to converge faster
+            # -------------------
+            # Tree complexity
+            max_depth=18,                # capture richer patterns, but not too deep
+            min_child_weight=5,         # minimum sum hessian in leaf to avoid over‑fitting small samples
+            gamma=1.0,                  # require a 1.0 loss reduction to make a split
+            # -------------------
+            # Randomness for bagging
+            subsample=0.9,              # row subsampling per tree
+            colsample_bytree=0.9,       # feature subsampling per tree
+            # -------------------
+            # Regularization
+            reg_alpha=0.1,              # L1 regularization
+            reg_lambda=1.0,             # L2 regularization
+            # -------------------
+            # GPU settings
+            tree_method="hist",
+            # predictor="gpu_predictor",
+            # gpu_id=0,
+            # -------------------
+            # Misc
+            # use_label_encoder=False,
+            eval_metric="auc",          # optimize for area‑under‑ROC
+            random_state=42,
+            verbosity=1,
+            device="cpu"
+        ),
+        }
+
+    elif l0_config == 'base++':
+        models = {
+            # 1) Gradient-boosted trees (oblivious)
+            "CatBoost": CatBoostClassifier(
+                loss_function      = "Logloss",
+                eval_metric        = "AUC",
+                depth              = 6,              # shallower → less over-fit
+                l2_leaf_reg        = 3.0,            # stronger regularisation
+                learning_rate      = 0.03,
+                bagging_temperature= 1.0,            # Bayesian bootstrap
+                random_strength    = 0.8,
+                subsample          = 0.8,
+                iterations         = 2000,           # early-stop inside .fit()
+                od_type            = "Iter",
+                od_wait            = 100,
+                random_seed        = RANDOM_STATE,
+                verbose            = False,
+                task_type          = "CPU"
+            ),
+
+            # 2) Gradient-boosting with GOSS sampling
+            "LightGBM_GOSS": LGBMClassifier(
+                boosting_type      = "goss",
+                objective          = "binary",
+                metric             = "auc",
+                num_leaves         = 63,             # ≈ 2^(max_depth)
+                max_depth          = -1,
+                learning_rate      = 0.015,
+                n_estimators       = 2500,
+                feature_fraction   = 0.9,
+                bagging_fraction   = 0.9,
+                bagging_freq       = 0,
+                min_child_samples  = 20,
+                lambda_l1          = 1e-2,
+                lambda_l2          = 1e-1,
+                random_state       = RANDOM_STATE,
+                device             = "cpu"
+            ),
+
+            # 3) XGBoost histogram
+            "XGBoost_hist": XGBClassifier(
+                objective          = "binary:logistic",
+                eval_metric        = "auc",
+                tree_method        = "hist",
+                learning_rate      = 0.02,
+                n_estimators       = 1500,
+                max_depth          = 6,
+                min_child_weight   = 1.0,
+                subsample          = 0.8,
+                colsample_bytree   = 0.8,
+                gamma              = 0.5,
+                reg_alpha          = 0.05,
+                reg_lambda         = 1.0,
+                random_state       = RANDOM_STATE,
+                verbosity          = 0,
+                device             = "cpu"
+            ),
+
+            # 4) Extremely-Randomised Trees (high-variance, high-diversity)
+            "ExtraTrees": ExtraTreesClassifier(
+                n_estimators       = 800,
+                max_depth          = None,
+                min_samples_split  = 4,
+                min_samples_leaf   = 2,
+                max_features       = "sqrt",
+                criterion          = "entropy",
+                bootstrap          = False,
+                random_state       = RANDOM_STATE,
+                n_jobs             = -1
+            ),
+
+            # 5) Elastic-Net logistic regression (linear baseline)
+            "LogReg_EN": LogisticRegression(
+                penalty            = "elasticnet",
+                solver             = "saga",
+                l1_ratio           = 0.2,
+                C                  = 1.0,
+                max_iter           = 20_000,
+                n_jobs             = -1,
+                random_state       = RANDOM_STATE
+            ),
+            "CatBoost" : CatBoostClassifier(
+                    loss_function="Logloss",
+                    random_seed=42,
+                    task_type="CPU",
+                    depth=8,
+                    learning_rate=0.03,
+                    iterations=800,
+                    verbose=False
+                ),
+                "LightGBM" : LGBMClassifier(
+                    objective="binary",
+                    boosting_type="dart",
+                    learning_rate=0.02,
+                    drop_rate=0.2,
+                    subsample=0.8,
+                    feature_fraction=0.8,
+                    max_depth=-1,
+                    device="cpu",
+                    seed=42,
+                    n_estimators=800
+                ),
+                "XGBoost": XGBClassifier(
+                    objective="binary:logistic",
+                    n_estimators=1000,
+                    learning_rate=0.01,
+                    tree_method="hist",       # GPU‑accelerated histogram algorithm
+                    # predictor="gpu_predictor",    # GPU for prediction, too
+                    # gpu_id=0,                     # which GPU to use
+                    # use_label_encoder=False,      # disable legacy label encoder
+                    verbosity=0,                  # silent
+                    random_state=42,
+                    device="cpu"
+                ),
+                "XGBoost2": XGBClassifier(
+                objective="binary:logistic",
+                # -------------------
+                # Core boosting
+                n_estimators=2000,          # more rounds to compensate for stronger regularization
+                learning_rate=0.01,         # slightly higher than 0.005 to converge faster
+                # -------------------
+                # Tree complexity
+                max_depth=8,                # capture richer patterns, but not too deep
+                min_child_weight=5,         # minimum sum hessian in leaf to avoid over‑fitting small samples
+                gamma=1.0,                  # require a 1.0 loss reduction to make a split
+                # -------------------
+                # Randomness for bagging
+                subsample=0.8,              # row subsampling per tree
+                colsample_bytree=0.8,       # feature subsampling per tree
+                # -------------------
+                # Regularization
+                reg_alpha=0.1,              # L1 regularization
+                reg_lambda=1.0,             # L2 regularization
+                # -------------------
+                # GPU settings
+                tree_method="hist",
+                # predictor="gpu_predictor",
+                # gpu_id=0,
+                # -------------------
+                # Misc
+                # use_label_encoder=False,
+                eval_metric="auc",          # optimize for area‑under‑ROC
+                random_state=42,
+                verbosity=1,
+                device="cpu"
+            ),
+                "XGBoost3": XGBClassifier(
+                objective="binary:logistic",
+                # -------------------
+                # Core boosting
+                n_estimators=2000,          # more rounds to compensate for stronger regularization
+                learning_rate=0.01,         # slightly higher than 0.005 to converge faster
+                # -------------------
+                # Tree complexity
+                max_depth=8,                # capture richer patterns, but not too deep
+                min_child_weight=5,         # minimum sum hessian in leaf to avoid over‑fitting small samples
+                gamma=1.0,                  # require a 1.0 loss reduction to make a split
+                # -------------------
+                # Randomness for bagging
+                subsample=0.8,              # row subsampling per tree
+                colsample_bytree=0.8,       # feature subsampling per tree
+                # -------------------
+                # Regularization
+                reg_alpha=0.1,              # L1 regularization
+                reg_lambda=1.0,             # L2 regularization
+                # -------------------
+                # GPU settings
+                tree_method="hist",
+                # predictor="gpu_predictor",
+                # gpu_id=0,
+                # -------------------
+                # Misc
+                # use_label_encoder=False,
+                eval_metric="auc",          # optimize for area‑under‑ROC
+                random_state=42,
+                verbosity=1,
+                device="cpu"
+            ),
+                "XGBoost4": XGBClassifier(
+                objective="binary:logistic",
+                # -------------------
+                # Core boosting
+                n_estimators=2000,          # more rounds to compensate for stronger regularization
+                learning_rate=0.001,         # slightly higher than 0.005 to converge faster
+                # -------------------
+                # Tree complexity
+                max_depth=18,                # capture richer patterns, but not too deep
+                min_child_weight=5,         # minimum sum hessian in leaf to avoid over‑fitting small samples
+                gamma=1.0,                  # require a 1.0 loss reduction to make a split
+                # -------------------
+                # Randomness for bagging
+                subsample=0.9,              # row subsampling per tree
+                colsample_bytree=0.9,       # feature subsampling per tree
+                # -------------------
+                # Regularization
+                reg_alpha=0.1,              # L1 regularization
+                reg_lambda=1.0,             # L2 regularization
+                # -------------------
+                # GPU settings
+                tree_method="hist",
+                # predictor="gpu_predictor",
+                # gpu_id=0,
+                # -------------------
+                # Misc
+                # use_label_encoder=False,
+                eval_metric="auc",          # optimize for area‑under‑ROC
+                random_state=42,
+                verbosity=1,
+                device="cpu"
+            ),
+        }
+
+        from pytorch_tabnet.tab_model import TabNetClassifier
+        import torch
+
+        models["TabNet"] = TabNetClassifier(
+            # Model capacity
+            n_d               = 32,        # decision layer width
+            n_a               = 32,        # attention layer width
+            n_steps           = 5,
+            n_independent     = 2,
+            n_shared          = 2,
+            gamma             = 1.5,       # feature-re-use penalty
+
+            # Regularisation / sparsity
+            lambda_sparse     = 1e-4,
+            mask_type         = "entmax",  # smoother sparsity
+
+            # Optimiser
+            optimizer_fn      = torch.optim.Adam,
+            optimizer_params  = dict(lr=2e-3, weight_decay=1e-5),
+
+            # Learning-rate schedule
+            scheduler_fn      = torch.optim.lr_scheduler.StepLR,
+            scheduler_params  = dict(step_size=50, gamma=0.9),
+
+            # Misc
+            seed              = RANDOM_STATE,
+            verbose           = 10,
+            device_name       = "cpu"      # switch to "cuda" if available
+        )
 
     for name, mdl in models.items():
         mdl.fit(X_train, y_train)

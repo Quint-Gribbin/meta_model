@@ -119,3 +119,4 @@ catboost
 openpyxl
 lightgbm
 xgboost
+pytorch-tabnet
