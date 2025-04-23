@@ -238,7 +238,8 @@ def main(rolling_train_length=2100,
                 'secular_growth',
                 'reflationary_cyclicals',
                 'inflation_levered',
-                'high_short_interest'
+                'high_short_interest',
+                'long_momentum'
                     ]
         df_factors = df_factors[subset]
     elif additional_factors == 0:
