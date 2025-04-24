@@ -2556,8 +2556,8 @@ def main(rolling_train_length=2100,
                 random_state        = RANDOM_STATE
             ),
 
-            "SGD_Hinge": SGDClassifier(                # linear SVM (hinge) + class weight
-                loss                = "hinge",
+            "SGD_Log": SGDClassifier(          # stochastic logistic regression
+                loss                = "log_loss",      # enables predict_proba
                 alpha               = 1e-4,
                 max_iter            = 15_000,
                 class_weight        = "balanced",
