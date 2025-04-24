@@ -2153,38 +2153,6 @@ def main(rolling_train_length=2100,
             # -------------------
             # Core boosting
             n_estimators=2000,          # more rounds to compensate for stronger regularization
-            learning_rate=0.01,         # slightly higher than 0.005 to converge faster
-            # -------------------
-            # Tree complexity
-            max_depth=8,                # capture richer patterns, but not too deep
-            min_child_weight=5,         # minimum sum hessian in leaf to avoid over‑fitting small samples
-            gamma=1.0,                  # require a 1.0 loss reduction to make a split
-            # -------------------
-            # Randomness for bagging
-            subsample=0.8,              # row subsampling per tree
-            colsample_bytree=0.8,       # feature subsampling per tree
-            # -------------------
-            # Regularization
-            reg_alpha=0.1,              # L1 regularization
-            reg_lambda=1.0,             # L2 regularization
-            # -------------------
-            # GPU settings
-            tree_method="hist",
-            # predictor="gpu_predictor",
-            # gpu_id=0,
-            # -------------------
-            # Misc
-            # use_label_encoder=False,
-            eval_metric="auc",          # optimize for area‑under‑ROC
-            random_state=42,
-            verbosity=1,
-            device="cpu"
-        ),
-            "XGBoost4": XGBClassifier(
-            objective="binary:logistic",
-            # -------------------
-            # Core boosting
-            n_estimators=2000,          # more rounds to compensate for stronger regularization
             learning_rate=0.001,         # slightly higher than 0.005 to converge faster
             # -------------------
             # Tree complexity
@@ -2365,38 +2333,6 @@ def main(rolling_train_length=2100,
                 # -------------------
                 # Core boosting
                 n_estimators=2000,          # more rounds to compensate for stronger regularization
-                learning_rate=0.01,         # slightly higher than 0.005 to converge faster
-                # -------------------
-                # Tree complexity
-                max_depth=8,                # capture richer patterns, but not too deep
-                min_child_weight=5,         # minimum sum hessian in leaf to avoid over‑fitting small samples
-                gamma=1.0,                  # require a 1.0 loss reduction to make a split
-                # -------------------
-                # Randomness for bagging
-                subsample=0.8,              # row subsampling per tree
-                colsample_bytree=0.8,       # feature subsampling per tree
-                # -------------------
-                # Regularization
-                reg_alpha=0.1,              # L1 regularization
-                reg_lambda=1.0,             # L2 regularization
-                # -------------------
-                # GPU settings
-                tree_method="hist",
-                # predictor="gpu_predictor",
-                # gpu_id=0,
-                # -------------------
-                # Misc
-                # use_label_encoder=False,
-                eval_metric="auc",          # optimize for area‑under‑ROC
-                random_state=42,
-                verbosity=1,
-                device="cpu"
-            ),
-                "XGBoost4": XGBClassifier(
-                objective="binary:logistic",
-                # -------------------
-                # Core boosting
-                n_estimators=2000,          # more rounds to compensate for stronger regularization
                 learning_rate=0.001,         # slightly higher than 0.005 to converge faster
                 # -------------------
                 # Tree complexity
@@ -2455,6 +2391,217 @@ def main(rolling_train_length=2100,
             verbose           = 10,
             device_name       = "cpu"      # switch to "cuda" if available
         )
+    
+    elif l0_config == 'v2':
+        # ─── Imports ──────────────────────────────────────────────────────
+        from catboost import CatBoostClassifier
+        from lightgbm import LGBMClassifier
+        from xgboost  import XGBClassifier
+        from sklearn.ensemble import (
+            ExtraTreesClassifier,
+            RandomForestClassifier,
+            HistGradientBoostingClassifier,
+            AdaBoostClassifier,
+            GradientBoostingClassifier,
+        )
+        from sklearn.linear_model  import (
+            LogisticRegression,
+            SGDClassifier,
+        )
+        from sklearn.svm           import SVC
+        from sklearn.neighbors     import KNeighborsClassifier
+        from sklearn.naive_bayes   import GaussianNB
+        from pytorch_tabnet.tab_model import TabNetClassifier
+        from imblearn.ensemble     import BalancedBaggingClassifier
+        import torch
+
+        # helper: class imbalance weight (≈1 if perfectly balanced)
+        pos_weight = (1 - y_train.mean()) / y_train.mean()
+
+        # ------------------------------------------------------------------
+        models = {
+            # ────────────────────────────────────────────────────────────
+            # Gradient-boosting family
+            # ────────────────────────────────────────────────────────────
+            "CatBoost": CatBoostClassifier(
+                loss_function       = "Logloss",
+                eval_metric         = "AUC",
+                depth               = 8,
+                learning_rate       = 0.02,
+                iterations          = 5000,
+                grow_policy         = "Lossguide",
+                l2_leaf_reg         = 6.0,
+                subsample           = 0.65,
+                random_strength     = 1.2,
+                bagging_temperature = 2.0,
+                auto_class_weights  = "Balanced",
+                od_type             = "Iter",
+                od_wait             = 300,
+                random_seed         = RANDOM_STATE,
+                verbose             = False,
+                task_type           = "CPU"
+            ),
+
+            "LightGBM_DART": LGBMClassifier(
+                boosting_type       = "dart",
+                objective           = "binary",
+                metric              = "auc",
+                num_leaves          = 255,
+                learning_rate       = 0.007,
+                n_estimators        = 6000,
+                feature_fraction    = 0.85,
+                bagging_fraction    = 0.8,
+                drop_rate           = 0.05,
+                skip_drop           = 0.4,
+                min_child_samples   = 25,
+                lambda_l1           = 5e-3,
+                lambda_l2           = 5e-2,
+                scale_pos_weight    = pos_weight,
+                random_state        = RANDOM_STATE,
+                device              = "cpu"
+            ),
+
+            "XGBoost_hist": XGBClassifier(
+                objective           = "binary:logistic",
+                eval_metric         = "auc",
+                tree_method         = "hist",
+                learning_rate       = 0.01,
+                n_estimators        = 8000,
+                max_depth           = 6,
+                min_child_weight    = 2.0,
+                subsample           = 0.7,
+                colsample_bytree    = 0.8,
+                gamma               = 0.2,
+                reg_alpha           = 0.1,
+                reg_lambda          = 1.2,
+                scale_pos_weight    = pos_weight,
+                random_state        = RANDOM_STATE,
+                verbosity           = 0,
+                device              = "cpu"
+            ),
+
+            "HistGB": HistGradientBoostingClassifier(
+                loss                = "log_loss",
+                max_depth           = 6,
+                learning_rate       = 0.03,
+                max_iter            = 2000,
+                l2_regularization   = 0.1,
+                early_stopping      = True,
+                validation_fraction = 0.1,
+                random_state        = RANDOM_STATE,
+                class_weight        = {0:1, 1:pos_weight}
+            ),
+
+            "Scikit_GB": GradientBoostingClassifier(
+                learning_rate       = 0.05,
+                n_estimators        = 1500,
+                max_depth           = 3,
+                subsample           = 0.7,
+                random_state        = RANDOM_STATE
+            ),
+
+            "AdaBoost": AdaBoostClassifier(
+                n_estimators        = 1500,
+                learning_rate       = 0.01,
+                random_state        = RANDOM_STATE
+            ),
+
+            # ────────────────────────────────────────────────────────────
+            # Bagging / Randomised trees
+            # ────────────────────────────────────────────────────────────
+            "ExtraTrees": ExtraTreesClassifier(
+                n_estimators        = 1500,
+                max_depth           = None,
+                min_samples_split   = 4,
+                min_samples_leaf    = 2,
+                max_features        = "sqrt",
+                criterion           = "entropy",
+                bootstrap           = False,
+                class_weight        = "balanced",
+                random_state        = RANDOM_STATE,
+                n_jobs              = -1
+            ),
+
+            "BalancedRF": RandomForestClassifier(
+                n_estimators        = 1200,
+                max_depth           = None,
+                min_samples_split   = 3,
+                min_samples_leaf    = 1,
+                max_features        = "sqrt",
+                class_weight        = "balanced_subsample",
+                random_state        = RANDOM_STATE,
+                n_jobs              = -1
+            ),
+
+            "BalancedBagging_DT": BalancedBaggingClassifier(          # pip install imbalanced-learn
+                n_estimators        = 800,
+                estimator           = None,   # default = DecisionTree
+                sampling_strategy    = "auto",
+                replacement          = False,
+                random_state         = RANDOM_STATE,
+                n_jobs              = -1
+            ),
+
+            # ────────────────────────────────────────────────────────────
+            # Linear / kernel / instance-based
+            # ────────────────────────────────────────────────────────────
+            "LogReg_EN": LogisticRegression(
+                penalty             = "elasticnet",
+                solver              = "saga",
+                l1_ratio            = 0.25,
+                C                   = 0.8,
+                max_iter            = 25_000,
+                class_weight        = "balanced",
+                n_jobs              = -1,
+                random_state        = RANDOM_STATE
+            ),
+
+            "SGD_Hinge": SGDClassifier(                # linear SVM (hinge) + class weight
+                loss                = "hinge",
+                alpha               = 1e-4,
+                max_iter            = 15_000,
+                class_weight        = "balanced",
+                random_state        = RANDOM_STATE
+            ),
+
+            "SVC_RBF": SVC(
+                C                   = 2.0,
+                gamma               = "scale",
+                probability         = True,
+                class_weight        = "balanced",
+                random_state        = RANDOM_STATE
+            ),
+
+            "KNN": KNeighborsClassifier(
+                n_neighbors         = 25,
+                weights             = "distance",
+                metric              = "minkowski",
+                p                   = 2,          # Euclidean
+                n_jobs              = -1
+            ),
+
+            "GaussianNB": GaussianNB(),
+
+            # ────────────────────────────────────────────────────────────
+            # Neural (tabular) models
+            # ────────────────────────────────────────────────────────────
+            "TabNet": TabNetClassifier(
+                n_d                 = 64,
+                n_a                 = 64,
+                n_steps             = 8,
+                gamma               = 1.3,
+                lambda_sparse       = 1e-4,
+                mask_type           = "entmax",
+                optimizer_fn        = torch.optim.Adam,
+                optimizer_params    = dict(lr=8e-4, weight_decay=1e-5),
+                scheduler_fn        = torch.optim.lr_scheduler.ReduceLROnPlateau,
+                scheduler_params    = dict(mode="max", factor=0.5, patience=20),
+                seed                = RANDOM_STATE,
+                verbose             = 10,
+                device_name         = "cpu"          # set "cuda" if available
+            ),
+        }
+
 
     for name, mdl in models.items():
         mdl.fit(X_train, y_train)
