@@ -35,6 +35,7 @@ def main(rolling_train_length=2100,
         return_lag=1,
         core_model_column="long_return",
         l0_config="base",
+        use_rank_features=1,
 ):
     args = locals().copy()
     args.pop("cluster_df")
@@ -1454,6 +1455,164 @@ def main(rolling_train_length=2100,
         will_df = query_job.to_dataframe()
         will_df = will_df.rename(columns=dict([(x, f"will_feature{x}") for x in will_df.columns if "_" in x]))
         df_long = df_long.merge(will_df, on=['date'], how='left')
+
+    if use_rank_features == 1:
+        import numpy as np
+        import pandas as pd
+        from typing import Iterable
+
+        # ──────────────────────────────────────────────────────────────────────────────
+        # 0.  Helpers
+        # ──────────────────────────────────────────────────────────────────────────────
+        def _prepare_ranks(df: pd.DataFrame) -> pd.DataFrame:
+            """Add an integer ‘rank’ column (1 = highest long_book_return within date)."""
+            out = df.copy()
+            out["date"] = pd.to_datetime(out["date"])
+            out["long_book_return"] = out["long_book_return"].astype(float)
+            out["rank"] = (
+                out.groupby("date")["long_book_return"]
+                .rank(ascending=False, method="first")
+                .astype(int)
+            )
+            return out
+
+
+        def _gini(x: np.ndarray) -> float:
+            """Cross-sectional Gini coefficient (absolute values, robust to sign)."""
+            if x.size == 0:
+                return np.nan
+            y = np.sort(np.abs(x))
+            n = y.size
+            cum = y.cumsum()
+            return (n + 1 - 2 * (cum / cum[-1]).sum()) / n
+
+
+        # ──────────────────────────────────────────────────────────────────────────────
+        # 1.  Daily cross-sectional statistics
+        # ──────────────────────────────────────────────────────────────────────────────
+        def _daily_stats(g: pd.DataFrame) -> pd.Series:
+            """Return one row of features for a single trading date (groupby apply)."""
+            r = g["long_book_return"]
+            ranks = g["rank"]
+
+            n = len(r)
+            top_q = r[ranks <= n * 0.25]
+            bot_q = r[ranks >  n * 0.75]
+
+            return pd.Series({
+                # level & shape of the distribution
+                "cs_mean"      : r.mean(),
+                "cs_std"       : r.std(ddof=0),
+                "cs_skew"      : r.skew(),
+                "cs_kurt"      : r.kurt(),            # Fisher (excess) kurtosis
+                # dispersion & inequality
+                "cs_gini"      : _gini(r.values),
+                # cross-sectional spread
+                "cs_q1_minus_q4": top_q.mean() - bot_q.mean(),
+                # data-quality flag
+                "cs_pct_zero"  : (r == 0).mean(),
+                # entropy of ranks (how uniform are the winners?)
+                "rank_entropy" : -(np.bincount(ranks) / n *
+                                np.log(np.bincount(ranks) / n + 1e-9)).sum()
+            })
+
+
+        # ──────────────────────────────────────────────────────────────────────────────
+        # 2.  Rank-based temporal features
+        # ──────────────────────────────────────────────────────────────────────────────
+        def _spearman_autocorr(df: pd.DataFrame, lag: int) -> pd.Series:
+            """Spearman ρ between today’s and t-lag’s ranks (one value per date)."""
+            df = df.sort_values("date")
+            dates = df["date"].unique()
+            out = pd.Series(index=dates, dtype=float, name=f"rank_autocorr_{lag}d")
+
+            # Pre-split to avoid repeated filtering inside loop
+            per_date = {d: g[["cluster", "rank"]] for d, g in df.groupby("date")}
+
+            for i, d in enumerate(dates):
+                j = i - lag
+                if j < 0:
+                    continue
+                curr = per_date[d]
+                prev = per_date[dates[j]]
+                merged = curr.merge(prev, on="cluster", suffixes=("_t", "_tlag"))
+                if len(merged) > 1:
+                    ρ = merged["rank_t"].corr(merged["rank_tlag"], method="spearman")
+                    out.loc[d] = ρ
+            return out
+
+
+        def _top_k_persistence(df: pd.DataFrame, k: int, window: int) -> pd.Series:
+            """
+            Fraction of today’s top-k clusters that also appeared in the
+            top-k set at least once during the previous `window` days.
+            """
+            df = df.sort_values("date")
+            dates = df["date"].unique()
+            top_per_date = {
+                d: set(g.loc[g["rank"] <= k, "cluster"])
+                for d, g in df.groupby("date")
+            }
+
+            out = pd.Series(index=dates, dtype=float,
+                            name=f"top{k}_persist_{window}d")
+
+            for i, d in enumerate(dates):
+                prev = set().union(
+                    *[top_per_date[dates[j]]
+                    for j in range(max(0, i - window), i)]
+                )
+                inter = top_per_date[d] & prev
+                if prev:
+                    out.loc[d] = len(inter) / k
+            return out
+
+
+        # ──────────────────────────────────────────────────────────────────────────────
+        # 3.  Public API – build the full feature matrix
+        # ──────────────────────────────────────────────────────────────────────────────
+        def build_features(
+            cluster_df: pd.DataFrame,
+            autocorr_lags: Iterable[int] = (1, 5, 20),
+            top_k: Iterable[int]      = (3, 5, 10),
+            persistence_windows: Iterable[int] = (3, 5, 20)
+        ) -> pd.DataFrame:
+            """
+            Parameters
+            ----------
+            cluster_df : raw dataframe with columns
+                ['date', 'cluster', 'long_book_return', ...].
+            autocorr_lags : lags (in days) for Spearman rank-autocorrelation.
+            top_k : list of k’s for top-k persistence.
+            persistence_windows : rolling windows (days) for persistence.
+
+            Returns
+            -------
+            pandas.DataFrame
+                One row per trading date; columns are engineered features.
+            """
+            df_r = _prepare_ranks(cluster_df)
+
+            # 1) date-level x-sectional stats
+            features = (df_r.groupby("date")
+                            .apply(_daily_stats)
+                            .sort_index())
+
+            # 2) rank autocorrelations
+            for lag in autocorr_lags:
+                features = features.join(_spearman_autocorr(df_r, lag))
+
+            # 3) top-k persistence grid
+            for k in top_k:
+                for w in persistence_windows:
+                    features = features.join(_top_k_persistence(df_r, k, w))
+
+            return features
+        
+        cluster_rank_query = f"SELECT * FROM `issachar-feature-library.qjg.meta-model-daily-spreads`"
+        cluster_rank_df = pd.read_gbq(cluster_rank_query, project_id='issachar-feature-library', use_bqstorage_api=True)
+        rank_features = build_features(cluster_rank_df).drop(columns=['cs_pct_zero'])
+        df_long = pd.merge(df_long, rank_features, how="left", on='date')
 
     # NOTE: As of 2025-03-07 the precision was not good enough to use
     if will_predictions == 1:

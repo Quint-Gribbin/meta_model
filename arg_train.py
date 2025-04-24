@@ -213,6 +213,11 @@ def main():
             type=str,
             default="base",
             help='Which returns to select from core model') 
+        
+        parser.add_argument('--use-rank-features',
+            type=int,
+            default=0,
+            help='Whether to use rank features or not') 
 
         args = parser.parse_args()
         return args
@@ -259,6 +264,7 @@ def main():
     return_lag = args.return_lag
     core_model_column = args.core_model_column
     l0_config = args.l0_config
+    use_rank_features = args.use_rank_features
 
     train_main_function(
         rolling_train_length=rolling_train_length,
@@ -296,8 +302,9 @@ def main():
         is_test=is_test,
         return_lag=return_lag,
         core_model_column=core_model_column,
-        l0_config=l0_config
-    )
+        l0_config=l0_config,
+        use_rank_features=use_rank_features
+        )
 
 if __name__ == "__main__":
     main()
