@@ -1214,6 +1214,11 @@ def main(rolling_train_length=2100,
     # # Concatenate with other features
     # df_long = pd.concat([df_long, cross_asset_features], axis=1)
 
+    cluster_rank_query = f"SELECT * FROM `issachar-feature-library.qjg.meta-model-daily-spreads`"
+    cluster_rank_df = pd.read_gbq(cluster_rank_query, project_id='issachar-feature-library', use_bqstorage_api=True)
+    cluster_rank_pivoted = cluster_rank_df.pivot_table(index='date', columns='cluster', values='total_return').sort_values("date").shift(1)
+    df_long = df_long.merge(cluster_rank_pivoted.add_prefix(f'clust_lag{1}_'), on='date', how='left')
+
 
     #####################################################################
     #  4.1 ADD NEW FEATURES
