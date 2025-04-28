@@ -1580,7 +1580,7 @@ def main(rolling_train_length=2100,
         def build_features(
             cluster_df: pd.DataFrame,
             autocorr_lags: Iterable[int] = (1, 5, 20),
-            top_k: Iterable[int]      = (3, 5, 10),
+            top_k: Iterable[int]      = (10, 50, 100),
             persistence_windows: Iterable[int] = (3, 5, 20)
         ) -> pd.DataFrame:
             """
