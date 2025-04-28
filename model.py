@@ -164,7 +164,7 @@ def main(rolling_train_length=2100,
     test['portfolio_id'] = 'core_model'
     test['core_model'] = test[core_model_column] / 100 # total_return
     # test = test.set_index("date")
-    df_port = test[['core_model', 'date']]
+    # df_port = test[['core_model', 'date']]
 
 
     ##########################################################################
