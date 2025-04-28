@@ -138,8 +138,8 @@ def main(rolling_train_length=2100,
             # df_port = df_port.set_index('date')
             df_port = df_port / 100 # Standardize the returns
             df_port = df_port[[x for x in df_port.columns if "inverse" not in x]] # Drop inverse portfolios (x*-1)
-            subset = ['growth', 'profitability', 'volume_price_action', 'st_vol', 'accumulation_distribution', 'skew', 'rsi_2', 'short_momentum', 'technical_momentum', 'technical_hma', 'technical_candle', 'forward_estimates', 'alpha_005', 'alpha_020', 'alpha_034', 'alpha_041', 'cagr_stack', 'cagr_stack_s3', 'fql_1', 'fql_2', 'fql_3', 'fql_4', 'fql_5', 'fql_6', 'fql_7', 'fql_8', 'fql_9']
-            df_port = df_port[subset]
+            # subset = ['growth', 'profitability', 'volume_price_action', 'st_vol', 'accumulation_distribution', 'skew', 'rsi_2', 'short_momentum', 'technical_momentum', 'technical_hma', 'technical_candle', 'forward_estimates', 'alpha_005', 'alpha_020', 'alpha_034', 'alpha_041', 'cagr_stack', 'cagr_stack_s3', 'fql_1', 'fql_2', 'fql_3', 'fql_4', 'fql_5', 'fql_6', 'fql_7', 'fql_8', 'fql_9']
+            # df_port = df_port[subset]
             df_port.index = df_port.index.tz_localize(None)
     else:
         cluster_df = cluster_df.fillna(0)
