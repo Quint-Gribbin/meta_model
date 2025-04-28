@@ -1615,8 +1615,8 @@ def main(rolling_train_length=2100,
 
             return features
         
-        cluster_rank_query = f"SELECT * FROM `issachar-scores.long_clusters_test.skew`"
-        cluster_rank_df = pd.read_gbq(cluster_rank_query, project_id='issachar-scores', use_bqstorage_api=True)
+        cluster_rank_query = f"SELECT * FROM `issachar-feature-library.qjg.skew-lowest-abstraction`"
+        cluster_rank_df = pd.read_gbq(cluster_rank_query, project_id='issachar-feature-library', use_bqstorage_api=True)
         rank_features = build_features(cluster_rank_df).drop(columns=['cs_pct_zero']).sort_values('date').shift(1)
         df_long = pd.merge(df_long, rank_features, how="left", on='date')
 
