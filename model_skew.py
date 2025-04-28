@@ -157,12 +157,12 @@ def main(rolling_train_length=2100,
     # 2. Update with the core model predictions
     ##########################################################################
 
-    test = pd.read_csv("risk_data (16).csv")
-    test['date'] = pd.to_datetime(test['date'])
-    test = test.sort_values('date', ascending=True)
-    # test = test[test['date'] > "2007-01-01"]
-    test['portfolio_id'] = 'core_model'
-    test['core_model'] = test[core_model_column] / 100 # total_return
+    # test = pd.read_csv("risk_data (16).csv")
+    # test['date'] = pd.to_datetime(test['date'])
+    # test = test.sort_values('date', ascending=True)
+    # # test = test[test['date'] > "2007-01-01"]
+    # test['portfolio_id'] = 'core_model'
+    # test['core_model'] = test[core_model_column] / 100 # total_return
     # test = test.set_index("date")
     # df_port = test[['core_model', 'date']]
 
@@ -1618,7 +1618,6 @@ def main(rolling_train_length=2100,
         cluster_rank_query = f"SELECT * FROM `issachar-feature-library.qjg.skew-lowest-abstraction`"
         cluster_rank_df = pd.read_gbq(cluster_rank_query, project_id='issachar-feature-library', use_bqstorage_api=True)
         rank_features = build_features(cluster_rank_df).drop(columns=['cs_pct_zero']).sort_values('date').shift(1)
-        rank_features = rank_features.set_index('date')
         rank_features.index = rank_features.index.tz_localize(None)
         df_long = pd.merge(df_long, rank_features, how="left", on='date')
 
