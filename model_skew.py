@@ -1618,6 +1618,8 @@ def main(rolling_train_length=2100,
         cluster_rank_query = f"SELECT * FROM `issachar-feature-library.qjg.skew-lowest-abstraction`"
         cluster_rank_df = pd.read_gbq(cluster_rank_query, project_id='issachar-feature-library', use_bqstorage_api=True)
         rank_features = build_features(cluster_rank_df).drop(columns=['cs_pct_zero']).sort_values('date').shift(1)
+        rank_features = rank_features.set_index('date')
+        rank_features.index = rank_features.index.tz_localize(None)
         df_long = pd.merge(df_long, rank_features, how="left", on='date')
 
     # NOTE: As of 2025-03-07 the precision was not good enough to use
