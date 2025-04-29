@@ -2875,7 +2875,6 @@ def main(rolling_train_length=2100,
     append_to_bigquery(df_l0_metrics, DESTINATION_DATASET, f'sub-meta-model-metrics')
     append_to_bigquery(df_l0_metrics, DESTINATION_DATASET, f'sub-meta-model-shap')
 
-
     # -------------------- 4. Simple equal‑weight ensemble ------------
     import numpy as np
     probas = np.column_stack([m.predict_proba(X_test)[:,1] for m in models.values()])
