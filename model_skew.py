@@ -1472,21 +1472,22 @@ def main(rolling_train_length=2100,
         # ──────────────────────────────────────────────────────────────────────────────
         # 0.  Helpers
         # ──────────────────────────────────────────────────────────────────────────────
+
         def _prepare_ranks(df: pd.DataFrame) -> pd.DataFrame:
-            """Add an integer ‘rank’ column (1 = highest long_book_return within date)."""
+            """Add an integer `rank` column (1 = highest return within each date)."""
             out = df.copy()
             out["date"] = pd.to_datetime(out["date"])
             out["returns"] = out["returns"].astype(float)
             out["rank"] = (
-                out.groupby("date")["returns"]
-                .rank(ascending=False, method="first")
-                .astype(int)
+                out.groupby("date")["returns"].rank(ascending=False, method="first").astype(int)
             )
             return out
 
 
+        # — Inequality metrics ————————————————————————————————————————————————
+
         def _gini(x: np.ndarray) -> float:
-            """Cross-sectional Gini coefficient (absolute values, robust to sign)."""
+            """Cross‑sectional Gini coefficient on |x| (robust to sign)."""
             if x.size == 0:
                 return np.nan
             y = np.sort(np.abs(x))
@@ -1495,83 +1496,128 @@ def main(rolling_train_length=2100,
             return (n + 1 - 2 * (cum / cum[-1]).sum()) / n
 
 
+        def _theil(x: np.ndarray) -> float:
+            """Theil entropy index on |x| (0 = equal, ↑ for concentration)."""
+            x = np.abs(x)
+            if x.size == 0 or np.allclose(x, 0):
+                return np.nan
+            mu = x.mean()
+            r = x / mu
+            r = r[r > 0]
+            return np.mean(r * np.log(r))
+
+
+        def _herfindahl(x: np.ndarray) -> float:
+            """Herfindahl‑Hirschman index on |x| (range (0,1])."""
+            x = np.abs(x)
+            s = x.sum()
+            if s == 0:
+                return np.nan
+            p = x / s
+            return np.sum(p ** 2)
+
+
+        def _var_cvar(r: np.ndarray, alpha: float = 0.05) -> tuple[float, float]:
+            """Value‑at‑Risk and Conditional VaR (CVaR) for tail `alpha`."""
+            if r.size == 0:
+                return np.nan, np.nan
+            var = np.quantile(r, alpha)
+            cvar = r[r <= var].mean() if (r <= var).any() else np.nan
+            return var, cvar
+
+
         # ──────────────────────────────────────────────────────────────────────────────
-        # 1.  Daily cross-sectional statistics
+        # 1.  Daily cross‑sectional statistics
         # ──────────────────────────────────────────────────────────────────────────────
+
         def _daily_stats(g: pd.DataFrame) -> pd.Series:
-            """Return one row of features for a single trading date (groupby apply)."""
-            r = g["returns"]
-            ranks = g["rank"]
+            """Return one row of features for a single trading date (groupby‑apply)."""
+            r = g["returns"].values
+            ranks = g["rank"].values
 
             n = len(r)
             top_q = r[ranks <= n * 0.25]
-            bot_q = r[ranks >  n * 0.75]
+            bot_q = r[ranks > n * 0.75]
+            top_d = r[ranks <= n * 0.10]
+            bot_d = r[ranks > n * 0.90]
+
+            # Tail metrics
+            tail_flag = np.abs(r - r.mean()) > 2 * r.std(ddof=0)
+            var5, cvar5 = _var_cvar(r, 0.05)
+            var95, cvar95 = _var_cvar(-r, 0.05)  # symmetric right‑tail on returns
+            var95 = -var95
+            cvar95 = -cvar95
 
             return pd.Series({
-                # level & shape of the distribution
-                "cs_mean"      : r.mean(),
-                "cs_std"       : r.std(ddof=0),
-                "cs_skew"      : r.skew(),
-                "cs_kurt"      : r.kurt(),            # Fisher (excess) kurtosis
-                # dispersion & inequality
-                "cs_gini"      : _gini(r.values),
-                # cross-sectional spread
-                "cs_q1_minus_q4": top_q.mean() - bot_q.mean(),
-                # data-quality flag
-                "cs_pct_zero"  : (r == 0).mean(),
-                # entropy of ranks (how uniform are the winners?)
-                "rank_entropy" : -(np.bincount(ranks) / n *
-                                np.log(np.bincount(ranks) / n + 1e-9)).sum()
+                # — Central tendency & dispersion —
+                "cs_mean"         : r.mean(),
+                "cs_median"       : np.median(r),
+                "cs_min"          : r.min(),
+                "cs_max"          : r.max(),
+                "cs_std"          : r.std(ddof=0),
+                "cs_cv"           : r.std(ddof=0) / (np.abs(r.mean()) + 1e-12),
+                "cs_iqr"          : np.quantile(r, 0.75) - np.quantile(r, 0.25),
+                "cs_mad"          : np.mean(np.abs(r - np.median(r))),
+                # — Shape —
+                "cs_skew"         : pd.Series(r).skew(),
+                "cs_kurt"         : pd.Series(r).kurt(),  # excess
+                # — Inequality & concentration —
+                "cs_gini"         : _gini(r),
+                "cs_theil"        : _theil(r),
+                "cs_hhi"          : _herfindahl(r),
+                "cs_eff_winners"  : 1 / _herfindahl(r) if not np.isnan(_herfindahl(r)) else np.nan,
+                # — Cross‑sectional spreads —
+                "cs_q1_minus_q4"  : top_q.mean() - bot_q.mean(),
+                "cs_d1_minus_d10": top_d.mean() - bot_d.mean(),
+                # — Sign & tail risk —
+                "cs_pct_pos"      : np.mean(r > 0),
+                "cs_pct_neg"      : np.mean(r < 0),
+                "cs_tail_2sigma"  : tail_flag.mean(),
+                "cs_var_5"        : var5,
+                "cs_cvar_5"       : cvar5,
+                "cs_var_95"       : var95,
+                "cs_cvar_95"      : cvar95,
+                # — Rank entropy —
+                "rank_entropy"    : -(
+                    (np.bincount(ranks, minlength=n + 1)[1:] / n)
+                    * np.log(np.bincount(ranks, minlength=n + 1)[1:] / n + 1e-9)
+                ).sum(),
             })
 
 
         # ──────────────────────────────────────────────────────────────────────────────
-        # 2.  Rank-based temporal features
+        # 2.  Rank‑based temporal features
         # ──────────────────────────────────────────────────────────────────────────────
+
         def _spearman_autocorr(df: pd.DataFrame, lag: int) -> pd.Series:
-            """Spearman ρ between today’s and t-lag’s ranks (one value per date)."""
+            """Spearman ρ between today’s and t‑lag’s ranks (one value per date)."""
             df = df.sort_values("date")
             dates = df["date"].unique()
             out = pd.Series(index=dates, dtype=float, name=f"rank_autocorr_{lag}d")
 
-            # Pre-split to avoid repeated filtering inside loop
             per_date = {d: g[["requestId", "rank"]] for d, g in df.groupby("date")}
 
             for i, d in enumerate(dates):
                 j = i - lag
                 if j < 0:
                     continue
-                curr = per_date[d]
-                prev = per_date[dates[j]]
-                merged = curr.merge(prev, on="requestId", suffixes=("_t", "_tlag"))
+                merged = per_date[d].merge(per_date[dates[j]], on="requestId", suffixes=("_t", "_tlag"))
                 if len(merged) > 1:
-                    ρ = merged["rank_t"].corr(merged["rank_tlag"], method="spearman")
-                    out.loc[d] = ρ
+                    out.loc[d] = merged["rank_t"].corr(merged["rank_tlag"], method="spearman")
             return out
 
 
         def _top_k_persistence(df: pd.DataFrame, k: int, window: int) -> pd.Series:
-            """
-            Fraction of today’s top-k clusters that also appeared in the
-            top-k set at least once during the previous `window` days.
-            """
+            """Fraction of today’s top‑k IDs that also appeared in the top‑k set during the previous `window` days."""
             df = df.sort_values("date")
             dates = df["date"].unique()
-            top_per_date = {
-                d: set(g.loc[g["rank"] <= k, "requestId"])
-                for d, g in df.groupby("date")
-            }
-
-            out = pd.Series(index=dates, dtype=float,
-                            name=f"top{k}_persist_{window}d")
+            top_per_date = {d: set(g.loc[g["rank"] <= k, "requestId"]) for d, g in df.groupby("date")}
+            out = pd.Series(index=dates, dtype=float, name=f"top{k}_persist_{window}d")
 
             for i, d in enumerate(dates):
-                prev = set().union(
-                    *[top_per_date[dates[j]]
-                    for j in range(max(0, i - window), i)]
-                )
-                inter = top_per_date[d] & prev
-                if prev:
+                prev_union = set().union(*(top_per_date[dates[j]] for j in range(max(0, i - window), i)))
+                inter = top_per_date[d] & prev_union
+                if prev_union:
                     out.loc[d] = len(inter) / k
             return out
 
@@ -1579,47 +1625,47 @@ def main(rolling_train_length=2100,
         # ──────────────────────────────────────────────────────────────────────────────
         # 3.  Public API – build the full feature matrix
         # ──────────────────────────────────────────────────────────────────────────────
+
         def build_features(
             cluster_df: pd.DataFrame,
             autocorr_lags: Iterable[int] = (1, 5, 20),
-            top_k: Iterable[int]      = (10, 50, 100),
-            persistence_windows: Iterable[int] = (3, 5, 20)
+            top_k: Iterable[int] = (10, 50, 100),
+            persistence_windows: Iterable[int] = (3, 5, 20),
         ) -> pd.DataFrame:
-            """
+            """Construct cross‑sectional feature matrix.
+
             Parameters
             ----------
-            cluster_df : raw dataframe with columns
-                ['date', 'cluster', 'long_book_return', ...].
-            autocorr_lags : lags (in days) for Spearman rank-autocorrelation.
-            top_k : list of k’s for top-k persistence.
-            persistence_windows : rolling windows (days) for persistence.
+            cluster_df : DataFrame with columns ['date', 'requestId', 'returns', ...]
+            autocorr_lags : lags for Spearman rank autocorrelation.
+            top_k : k‑values for top‑k persistence.
+            persistence_windows : rolling windows for persistence metrics.
 
             Returns
             -------
-            pandas.DataFrame
-                One row per trading date; columns are engineered features.
+            DataFrame indexed by date with engineered features.
             """
             df_r = _prepare_ranks(cluster_df)
 
-            # 1) date-level x-sectional stats
-            features = (df_r.groupby("date")
-                            .apply(_daily_stats)
-                            .sort_index())
+            # 1) Static daily metrics
+            features = df_r.groupby("date").apply(_daily_stats).sort_index()
 
-            # 2) rank autocorrelations
+            # 2) Rank autocorrelations
             for lag in autocorr_lags:
                 features = features.join(_spearman_autocorr(df_r, lag))
 
-            # 3) top-k persistence grid
+            # 3) Top‑k persistence grid
             for k in top_k:
                 for w in persistence_windows:
                     features = features.join(_top_k_persistence(df_r, k, w))
 
             return features
-        
-        cluster_rank_query = f"SELECT * FROM `issachar-feature-library.qjg.skew-lowest-abstraction`"
-        cluster_rank_df = pd.read_gbq(cluster_rank_query, project_id='issachar-feature-library', use_bqstorage_api=True)
-        rank_features = build_features(cluster_rank_df).drop(columns=['cs_pct_zero']).sort_values('date').shift(1)
+
+
+        # Example usage (comment out if running inside production pipeline)
+        cluster_rank_query = "SELECT * FROM `issachar-feature-library.qjg.skew-lowest-abstraction`"
+        cluster_rank_df = pd.read_gbq(cluster_rank_query, project_id="issachar-feature-library", use_bqstorage_api=True)
+        rank_features = build_features(cluster_rank_df).sort_values("date").shift(1)
         rank_features.index = rank_features.index.tz_localize(None)
         df_long = pd.merge(df_long, rank_features, how="left", on='date')
 
