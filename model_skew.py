@@ -2840,29 +2840,41 @@ def main(rolling_train_length=2100,
         metrics_list.append(single_model_metrics)
 
     # ——— 4) flatten SHAP into list of dicts ——
-    shap_dicts = []
-    feat_names = final_columns
+    feat_names = feature_columns
+    shap_summary = []
 
     for name, raw_shap in shap_values_dict.items():
-        n_samples, n_feats = raw_shap.shape
-        for i in range(n_samples):
-            row = {'model': name, 'sample_index': i}
-            # add one key per feature
-            for j, feat in enumerate(feat_names):
-                row[feat] = raw_shap[i, j]
-            shap_dicts.append(row)
+        # raw_shap: (n_samples, n_feats)
+        n_feats = raw_shap.shape[1]
+        # make sure your feature list lines up with raw_shap
+        used_feats = feature_columns[:n_feats]  
+
+        for j, feat in enumerate(used_feats):
+            vals = raw_shap[:, j]
+            shap_summary.append({
+                'model'       : name,
+                'feature'     : feat,
+                # average over days
+                'mean_shap'   : np.mean(vals),
+                # peak effect over days
+                'max_shap'    : np.max(vals),
+                # if you want absolute instead:
+                # 'mean_abs_shap': np.mean(np.abs(vals)),
+                # 'max_abs_shap' : np.max(np.abs(vals)),
+            })
 
 
     # ——— 5) save SHAP values and metrics to BigQuery ——
     df_l0_metrics = pd.DataFrame(metrics_list)
     df_l0_metrics['runtime'] = current_time
     df_l0_metrics['uuid'] = uuid
-    df_l0_shap     = pd.DataFrame(shap_dicts)
+    df_l0_shap     = pd.DataFrame(shap_summary)
     df_l0_shap['runtime'] = current_time
     df_l0_shap['uuid'] = uuid
 
     append_to_bigquery(df_l0_metrics, DESTINATION_DATASET, f'sub-meta-model-metrics')
     append_to_bigquery(df_l0_metrics, DESTINATION_DATASET, f'sub-meta-model-shap')
+
 
     # -------------------- 4. Simple equal‑weight ensemble ------------
     import numpy as np
