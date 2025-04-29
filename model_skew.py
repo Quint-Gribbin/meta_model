@@ -2199,11 +2199,27 @@ def main(rolling_train_length=2100,
 
     pca_df = pd.read_excel("PCA Exposures.xlsx")
     pca_df['date'] = pd.to_datetime(pca_df['date']).dt.tz_localize(None)
+    pca_df = pca_df.sort_values("date").fillna(0)
 
     # 2) choose your windows
     windows = [20, 60, 120]
 
     orig_pcs = [c for c in pca_df.columns if c.startswith("PC_")]
+
+    # 3) helper: for a Series, return its rolling decile (1–10) at each point
+    def rolling_decile(s: pd.Series) -> pd.Series:
+        return s.expanding().apply(
+            # for each window x, compute:
+            #  - decile=1 if it's the only value
+            #  - else ceil(percentile_rank_of_last * 10)
+            lambda x: 1 if x.shape[0] == 1
+                    else int(np.ceil(x.rank(pct=True).iloc[-1] * 10)),
+            raw=False
+        ).astype(int)
+
+    # 4) apply to each PC
+    for col in orig_pcs:
+        pca_df[f"{col}_decile"] = rolling_decile(pca_df[col])
 
     # 3) for each window & each PC, compute the rolling z-score at each date
     for w in windows:
