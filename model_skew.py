@@ -2807,7 +2807,6 @@ def main(rolling_train_length=2100,
         if isinstance(mdl, (CatBoostClassifier, XGBClassifier)):
             explainer = shap.TreeExplainer(mdl)
 
-
         # — compute SHAP on X_test —
         raw_shap = explainer.shap_values(X_test) #, nsamples=100)
         # if list of arrays ([neg, pos]), take pos‐class
