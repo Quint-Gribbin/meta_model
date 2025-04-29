@@ -2249,6 +2249,8 @@ def main(rolling_train_length=2100,
     # apply the *same* selected features to TEST
     X_test = X_test[X_train.columns]
 
+    final_columns = X_train.columns.tolist()
+
     # standardise *after* the split
     from sklearn.preprocessing import StandardScaler
     scaler = StandardScaler().fit(X_train)
@@ -2839,7 +2841,7 @@ def main(rolling_train_length=2100,
 
     # ——— 4) flatten SHAP into list of dicts ——
     shap_dicts = []
-    feat_names = X_test.columns.tolist()
+    feat_names = final_columns
 
     for name, raw_shap in shap_values_dict.items():
         n_samples, n_feats = raw_shap.shape
