@@ -73,7 +73,8 @@ def main(rolling_train_length=2100,
     from datetime import datetime, timedelta
 
     holdout_start = pd.to_datetime(holdout_start)
-    uuid = str(pd.Timestamp.now()) + "__model=Meta_Model__" + "__".join(f"{key}={value}" for key, value in args.items())
+    current_time = pd.Timestamp.now()
+    uuid = str(current_time) + "__model=Meta_Model__" + "__".join(f"{key}={value}" for key, value in args.items())
 
     # Google Cloud imports
     from google.cloud import bigquery, storage
@@ -260,6 +261,7 @@ def main(rolling_train_length=2100,
 
     # TODO: Update to Dask to use all 16 cores
     feature_gen_start = time.time()
+
     #####################################################################
     #  3. FEATURE ENGINEERING
     #####################################################################
@@ -2198,6 +2200,19 @@ def main(rolling_train_length=2100,
     pca_df = pd.read_excel("PCA Exposures.xlsx")
     pca_df['date'] = pd.to_datetime(pca_df['date']).dt.tz_localize(None)
 
+    # 2) choose your windows
+    windows = [20, 60, 120]
+
+    orig_pcs = [c for c in pca_df.columns if c.startswith("PC_")]
+
+    # 3) for each window & each PC, compute the rolling z-score at each date
+    for w in windows:
+        roll = pca_df[orig_pcs].rolling(window=w, min_periods=1)
+        means = roll.mean()
+        stds  = roll.std(ddof=0)
+        for col in orig_pcs:
+            pca_df[f"{col}_z_{w}d"] = (pca_df[col] - means[col]) / stds[col]
+
     df_long = df_long.sort_values("date")
     df_long = pd.merge(df_long, pca_df, on='date', how='left')
     df_long['positive_return'] = df_long['returns'].apply(lambda x: 0 if x < 0 else 1)
@@ -2768,10 +2783,93 @@ def main(rolling_train_length=2100,
             ),
         }
 
+    # -------------------- 5.  Classification metrics -----------------
+    from sklearn.metrics import (accuracy_score, precision_score, recall_score,
+                                f1_score, roc_auc_score, brier_score_loss,
+                                confusion_matrix, roc_curve,
+                                precision_recall_curve)
+    from sklearn.calibration import calibration_curve
 
+    # ——— 1) background for SHAP ——
+    background = X_train#.sample(n=100, random_state=42)
+
+    # ——— 2) storage ——
+    metrics_list = []
+    shap_values_dict = {}   # temporary storage of raw arrays
+
+    # ——— 3) loop over models ——
     for name, mdl in models.items():
         mdl.fit(X_train, y_train)
         print(f"{name} fitted")
+
+        now = time.time()
+        # — choose best explainer —
+        if isinstance(mdl, (CatBoostClassifier, LGBMClassifier, XGBClassifier,
+                            ExtraTreesClassifier, RandomForestClassifier,
+                            HistGradientBoostingClassifier, GradientBoostingClassifier)):
+            explainer = shap.TreeExplainer(mdl)
+        elif isinstance(mdl, (LogisticRegression, SGDClassifier)):
+            explainer = shap.LinearExplainer(mdl, background)
+        else:
+            try:
+                explainer = shap.KernelExplainer(mdl.predict_proba, background)
+            except:
+                print("Model not supported")
+
+        # — compute SHAP on X_test —
+        raw_shap = explainer.shap_values(X_test) #, nsamples=100)
+        # if list of arrays ([neg, pos]), take pos‐class
+        if isinstance(raw_shap, list):
+            raw_shap = raw_shap[1]
+        shap_values_dict[name] = raw_shap
+        print(f"{name} SHAP values done")
+        print(f"Time to compute SHAP values: {time.time() - now}")
+
+
+        # — compute preds & probabilities —
+        y_pred  = mdl.predict(X_test)
+        y_proba = mdl.predict_proba(X_test)[:,1]
+
+        single_model_metrics = {
+            'model'    : name,
+            'accuracy' : accuracy_score(y_test, y_pred),
+            'precision': precision_score(y_test, y_pred),
+            'recall'   : recall_score(y_test, y_pred),
+            'f1'       : f1_score(y_test, y_pred),
+            'roc_auc'  : roc_auc_score(y_test, y_proba),
+            'brier'    : brier_score_loss(y_test, y_proba),
+            # ← you could also add 'log_loss': log_loss(y_test, y_proba)
+        }
+
+        print(single_model_metrics)
+
+        # — compute metrics dict —
+        metrics_list.append(single_model_metrics)
+
+    # ——— 4) flatten SHAP into list of dicts ——
+    shap_dicts = []
+    feat_names = X_test.columns.tolist()
+
+    for name, raw_shap in shap_values_dict.items():
+        n_samples, n_feats = raw_shap.shape
+        for i in range(n_samples):
+            row = {'model': name, 'sample_index': i}
+            # add one key per feature
+            for j, feat in enumerate(feat_names):
+                row[feat] = raw_shap[i, j]
+            shap_dicts.append(row)
+
+
+    # ——— 5) save SHAP values and metrics to BigQuery ——
+    df_l0_metrics = pd.DataFrame(metrics_list)
+    df_l0_metrics['runtime'] = current_time
+    df_l0_metrics['uuid'] = uuid
+    df_l0_shap     = pd.DataFrame(shap_dicts)
+    df_l0_shap['runtime'] = current_time
+    df_l0_shap['uuid'] = uuid
+
+    append_to_bigquery(df_l0_metrics, DESTINATION_DATASET, f'sub-meta-model-metrics')
+    append_to_bigquery(df_l0_metrics, DESTINATION_DATASET, f'sub-meta-model-shap')
 
     # -------------------- 4. Simple equal‑weight ensemble ------------
     import numpy as np
@@ -2783,15 +2881,6 @@ def main(rolling_train_length=2100,
     ###################################################################################
     # 4. Evaluate the model performance
     ###################################################################################
-
-    uuid = str(pd.Timestamp.now()) + "__model=Meta_Model__" + "__".join(f"{key}={value}" for key, value in args.items())
-    
-    # -------------------- 5.  Classification metrics -----------------
-    from sklearn.metrics import (accuracy_score, precision_score, recall_score,
-                                f1_score, roc_auc_score, brier_score_loss,
-                                confusion_matrix, roc_curve,
-                                precision_recall_curve)
-    from sklearn.calibration import calibration_curve
 
     accuracy  = accuracy_score (y_test, y_pred)
     precision = precision_score(y_test, y_pred)
