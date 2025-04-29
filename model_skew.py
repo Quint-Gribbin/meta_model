@@ -2804,17 +2804,9 @@ def main(rolling_train_length=2100,
 
         now = time.time()
         # — choose best explainer —
-        if isinstance(mdl, (CatBoostClassifier, LGBMClassifier, XGBClassifier,
-                            ExtraTreesClassifier, RandomForestClassifier,
-                            HistGradientBoostingClassifier, GradientBoostingClassifier)):
+        if isinstance(mdl, (CatBoostClassifier, XGBClassifier)):
             explainer = shap.TreeExplainer(mdl)
-        elif isinstance(mdl, (LogisticRegression, SGDClassifier)):
-            explainer = shap.LinearExplainer(mdl, background)
-        else:
-            try:
-                explainer = shap.KernelExplainer(mdl.predict_proba, background)
-            except:
-                print("Model not supported")
+
 
         # — compute SHAP on X_test —
         raw_shap = explainer.shap_values(X_test) #, nsamples=100)
