@@ -3229,7 +3229,7 @@ def main(rolling_train_length=2100,
     X_test_meta  = pd.concat([X_test_df,  pd.DataFrame(proba_test)],  axis=1)
 
     # d) Identify the probability columns
-    proba_cols = [col for col in X_train_meta.columns if col.endswith("_proba")]
+    proba_cols = [col for col in X_train_meta.columns if str(col).endswith("_proba")]
 
     # e) Function to add meta‐features based on probability columns
     def add_meta_features(df, proba_cols, threshold=0.5, eps=1e-15):
