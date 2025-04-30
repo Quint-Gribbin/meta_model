@@ -2243,6 +2243,7 @@ def main(rolling_train_length=2100,
         return X.loc[:, mi > thresh]
 
 
+    # 1) load the PCA exposures
     pca_df = pd.read_excel("PCA Exposures.xlsx")
     pca_df['date'] = pd.to_datetime(pca_df['date']).dt.tz_localize(None)
     pca_df = pca_df.sort_values("date").fillna(0)
@@ -2277,6 +2278,172 @@ def main(rolling_train_length=2100,
 
     df_long = df_long.sort_values("date")
     df_long = pd.merge(df_long, pca_df, on='date', how='left')
+
+    # 2) Add the fractional differentiation features
+    from statsmodels.tsa.stattools import adfuller
+
+    class FractionalDifferentiation:
+        """
+        FractionalDifferentiation class encapsulates the functions that can
+        be used to compute fractionally differentiated series.
+        """
+
+        @staticmethod
+        def get_weights(diff_amt, size):
+
+            # The algorithm below executes the iterative estimation (section 5.4.2, page 78)
+            weights = [1.]  # create an empty list and initialize the first element with 1.
+            for k in range(1, size):
+                weights_ = -weights[-1] * (diff_amt - k + 1) / k  # compute the next weight
+                weights.append(weights_)
+
+            # Now, reverse the list, convert into a numpy column vector
+            weights = np.array(weights[::-1]).reshape(-1, 1)
+            return weights
+
+        @staticmethod
+        def frac_diff(series, diff_amt, thresh=0.01):
+
+            # 1. Compute weights for the longest series
+            weights = get_weights(diff_amt, series.shape[0])
+
+            # 2. Determine initial calculations to be skipped based on weight-loss threshold
+            weights_ = np.cumsum(abs(weights))
+            weights_ /= weights_[-1]
+            skip = weights_[weights_ > thresh].shape[0]
+
+            # 3. Apply weights to values
+            output_df = {}
+            for name in series.columns:
+                series_f = series[[name]].fillna(method='ffill').dropna()
+                output_df_ = pd.Series(index=series.index, dtype='float64')
+
+                for iloc in range(skip, series_f.shape[0]):
+                    loc = series_f.index[iloc]
+
+                    # At this point all entries are non-NAs so no need for the following check
+                    # if np.isfinite(series.loc[loc, name]):
+                    output_df_[loc] = np.dot(weights[-(iloc + 1):, :].T, series_f.loc[:loc])[0, 0]
+
+                output_df[name] = output_df_.copy(deep=True)
+            output_df = pd.concat(output_df, axis=1)
+            return output_df
+
+        @staticmethod
+        def get_weights_ffd(diff_amt, thresh, lim):
+
+            weights = [1.]
+            k = 1
+
+            # The algorithm below executes the iterativetive estimation (section 5.4.2, page 78)
+            # The output weights array is of the indicated length (specified by lim)
+            ctr = 0
+            while True:
+                # compute the next weight
+                weights_ = -weights[-1] * (diff_amt - k + 1) / k
+
+                if abs(weights_) < thresh:
+                    break
+
+                weights.append(weights_)
+                k += 1
+                ctr += 1
+                if ctr == lim - 1:  # if we have reached the size limit, exit the loop
+                    break
+
+            # Now, reverse the list, convert into a numpy column vector
+            weights = np.array(weights[::-1]).reshape(-1, 1)
+            return weights
+
+        @staticmethod
+        def frac_diff_ffd(series, diff_amt, thresh=1e-5):
+
+            # 1) Compute weights for the longest series
+            weights = get_weights_ffd(diff_amt, thresh, series.shape[0])
+            width = len(weights) - 1
+
+            # 2) Apply weights to values
+            # 2.1) Start by creating a dictionary to hold all the fractionally differenced series
+            output_df = {}
+
+            # 2.2) compute fractionally differenced series for each stock
+            for name in series.columns:
+                series_f = series[[name]].fillna(method='ffill').dropna()
+                temp_df_ = pd.Series(index=series.index, dtype='float64')
+                for iloc1 in range(width, series_f.shape[0]):
+                    loc0 = series_f.index[iloc1 - width]
+                    loc1 = series.index[iloc1]
+
+                    # At this point all entries are non-NAs, hence no need for the following check
+                    # if np.isfinite(series.loc[loc1, name]):
+                    temp_df_[loc1] = np.dot(weights.T, series_f.loc[loc0:loc1])[0, 0]
+
+                output_df[name] = temp_df_.copy(deep=True)
+
+            # transform the dictionary into a data frame
+            output_df = pd.concat(output_df, axis=1)
+            return output_df
+
+
+    def get_weights(diff_amt, size):
+        """ This is a pass-through function """
+        return FractionalDifferentiation.get_weights(diff_amt, size)
+
+
+    def frac_diff(series, diff_amt, thresh=0.01):
+        """ This is a pass-through function """
+        return FractionalDifferentiation.frac_diff(series, diff_amt, thresh)
+
+
+    def get_weights_ffd(diff_amt, thresh, lim):
+        """ This is a pass-through function """
+        return FractionalDifferentiation.get_weights_ffd(diff_amt, thresh, lim)
+
+
+    def frac_diff_ffd(series, diff_amt, thresh=1e-5):
+        return FractionalDifferentiation.frac_diff_ffd(series, diff_amt, thresh)
+
+    def plot_min_ffd(series):
+
+        results = pd.DataFrame(columns=['adfStat', 'pVal', 'lags', 'nObs', '95% conf', 'corr'])
+
+        # Iterate through d values with 0.1 step
+        for d_value in np.linspace(0, 1, 11):
+            close_prices = np.log(series[['close']]).resample('1D').last()  # Downcast to daily obs
+            close_prices.dropna(inplace=True)
+
+            # Applying fractional differentiation
+            differenced_series = frac_diff_ffd(close_prices, diff_amt=d_value, thresh=0.01).fillna(0)
+
+            # Correlation between the original and the differentiated series
+            corr = np.corrcoef(close_prices.loc[differenced_series.index, 'close'],
+                            differenced_series['close'])[0, 1]
+            # Applying ADF
+            differenced_series = adfuller(differenced_series['close'], maxlag=1, regression='c', autolag=None)
+
+            # Results to dataframe
+            results.loc[d_value] = list(differenced_series[:4]) + [differenced_series[4]['5%']] + [corr]  # With critical value
+
+        # Plotting
+        plot = results[['adfStat', 'corr']].plot(secondary_y='adfStat', figsize=(10, 8))
+        plt.axhline(results['95% conf'].mean(), linewidth=1, color='r', linestyle='dotted')
+
+        return plot
+    
+    series = pd.DataFrame({"close":df_long["lag1_price"].values}, index=df_long["date"].values).iloc[1:]
+    ds = [0.3, 0.5, 0.7]
+    features = pd.concat(
+        [frac_diff_ffd(series[['close']], diff_amt=d, thresh=0.01)
+            .rename(columns=lambda c: f"{c}_fd{d}") 
+        for d in ds],
+        axis=1
+    ).dropna()
+    features.index.name = 'date'
+
+    df_long = pd.merge(df_long, features, on='date', how='left')
+
+    # 3) Add the features to the main dataframe
+
     df_long['positive_return'] = df_long['returns'].apply(lambda x: 0 if x < 0 else 1)
     # df_long['positive_return'] = df_long['returns'].shift(-4).apply(lambda x: 0 if x < 0 else 1)
 
@@ -3053,9 +3220,47 @@ def main(rolling_train_length=2100,
     X_train_df = pd.DataFrame(X_train).reset_index(drop=True)
     X_test_df  = pd.DataFrame(X_test).reset_index(drop=True)
 
-    # c) Append the new probability features column‑wise
+    # c) Append the new probability features column-wise
     X_train_meta = pd.concat([X_train_df, pd.DataFrame(proba_train)], axis=1)
     X_test_meta  = pd.concat([X_test_df,  pd.DataFrame(proba_test)],  axis=1)
+
+    # d) Identify the probability columns
+    proba_cols = [col for col in X_train_meta.columns if col.endswith("_proba")]
+
+    # e) Function to add meta‐features based on probability columns
+    def add_meta_features(df, proba_cols, threshold=0.5, eps=1e-15):
+        P = df[proba_cols]
+        
+        # basic moments
+        df["meta_mean"]   = P.mean(axis=1)
+        df["meta_std"]    = P.std(axis=1)
+        df["meta_min"]    = P.min(axis=1)
+        df["meta_max"]    = P.max(axis=1)
+        df["meta_range"]  = df["meta_max"] - df["meta_min"]
+        df["meta_median"] = P.median(axis=1)
+        
+        # quantiles & IQR
+        df["meta_q25"] = P.quantile(0.25, axis=1)
+        df["meta_q75"] = P.quantile(0.75, axis=1)
+        df["meta_iqr"] = df["meta_q75"] - df["meta_q25"]
+        
+        # higher‐order moments
+        df["meta_skew"]     = P.skew(axis=1)
+        df["meta_kurtosis"] = P.kurtosis(axis=1)
+        
+        # entropy (sum of binary‐entropies)
+        ent = -(P * np.log(P + eps) + (1 - P) * np.log(1 - P + eps))
+        df["meta_entropy"] = ent.sum(axis=1)
+        
+        # threshold‐based measures
+        df["meta_count_above_thr"] = (P > threshold).sum(axis=1)
+        df["meta_frac_above_thr"]  = df["meta_count_above_thr"] / len(proba_cols)
+        
+        return df
+
+    # f) Apply to your train & test metasets
+    X_train_meta = add_meta_features(X_train_meta, proba_cols)
+    X_test_meta  = add_meta_features(X_test_meta,  proba_cols)
 
     print("Meta feature matrix shape:", X_train_meta.shape, "train  |", X_test_meta.shape, "test")
 
@@ -3171,8 +3376,6 @@ def main(rolling_train_length=2100,
     ##############################################################################################
 
     # -------------------- 4.  Build meta‐feature sets (probabilities only) ---------
-    import pandas as pd
-
     # a) Collect probability columns for train and test
     proba_train = {
         f"{name}_proba": mdl.predict_proba(X_train)[:, 1]
@@ -3186,6 +3389,41 @@ def main(rolling_train_length=2100,
     # b) Turn them into DataFrames
     X_train_meta = pd.DataFrame(proba_train).reset_index(drop=True)
     X_test_meta  = pd.DataFrame(proba_test).reset_index(drop=True)
+
+    # c) Helper to add meta‐features
+    def add_meta_features(df, threshold=0.5, eps=1e-15):
+        # basic moments
+        df["meta_mean"]   = df.mean(axis=1)
+        df["meta_std"]    = df.std(axis=1)
+        df["meta_min"]    = df.min(axis=1)
+        df["meta_max"]    = df.max(axis=1)
+        df["meta_range"]  = df["meta_max"] - df["meta_min"]
+        df["meta_median"] = df.median(axis=1)
+
+        # quantiles & IQR
+        df["meta_q25"] = df.quantile(0.25, axis=1)
+        df["meta_q75"] = df.quantile(0.75, axis=1)
+        df["meta_iqr"] = df["meta_q75"] - df["meta_q25"]
+
+        # shape of the distribution
+        df["meta_skew"]     = df.skew(axis=1)
+        df["meta_kurtosis"] = df.kurtosis(axis=1)
+
+        # model‐disagreement / uncertainty
+        # binary entropy per model, summed
+        ent = -(df * np.log(df + eps) + (1 - df) * np.log(1 - df + eps))
+        df["meta_entropy"] = ent.sum(axis=1)
+
+        # threshold‐based counts
+        df["meta_count_above_thr"] = (df > threshold).sum(axis=1)
+        df["meta_frac_above_thr"]  = df["meta_count_above_thr"] / df.shape[1]
+
+        return df
+
+    # Apply to train & test
+    X_train_meta = add_meta_features(X_train_meta)
+    X_test_meta  = add_meta_features(X_test_meta)
+
 
     print("Meta feature matrix shape:",
         X_train_meta.shape, "train  |", X_test_meta.shape, "test")

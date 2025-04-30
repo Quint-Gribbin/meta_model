@@ -2,10 +2,13 @@ Notes
 
 * Feature importance X
 * L0 model metrics X
-* Additional (L1, L2) layers
 * Additional Z score feature engineering X
+* Add deciles for the PCA X
+* Add more cross sectional features X
+
+
 * Changing targets
 * Meta model probability ranges
 * Add the Hudson Bay code Fractional Differentiation
-* Add deciles for the PCA X
-* Add more cross sectional features
+* Additional (L1, L2) layers
+
