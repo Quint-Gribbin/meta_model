@@ -3038,6 +3038,15 @@ def main(rolling_train_length=2100,
         if isinstance(mdl, (CatBoostClassifier, XGBClassifier)):
             explainer = shap.TreeExplainer(mdl)
 
+        elif isinstance(mdl, (LogisticRegression, SGDClassifier)):
+            # linear models use LinearExplainer (fast, exact for linear)
+            # X_train acts as the "background" dataset
+            explainer = shap.LinearExplainer(
+                mdl,
+                X_train,
+                feature_dependence="independent"  # assume features are independent
+            )
+
         # — compute SHAP on X_test —
         raw_shap = explainer.shap_values(X_test) #, nsamples=100)
         # if list of arrays ([neg, pos]), take pos‐class
