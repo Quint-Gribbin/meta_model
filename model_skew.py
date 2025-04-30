@@ -3106,7 +3106,7 @@ def main(rolling_train_length=2100,
     df_l0_shap['uuid'] = uuid
 
     append_to_bigquery(df_l0_metrics, DESTINATION_DATASET, f'sub-meta-model-metrics')
-    append_to_bigquery(df_l0_metrics, DESTINATION_DATASET, f'sub-meta-model-shap')
+    append_to_bigquery(df_l0_shap, DESTINATION_DATASET, f'sub-meta-model-shap')
 
     # -------------------- 4. Simple equal‑weight ensemble ------------
     import numpy as np
