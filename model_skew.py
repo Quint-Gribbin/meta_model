@@ -2488,10 +2488,25 @@ def main(rolling_train_length=2100,
 
     # -------------------- 3.  Base models (all *classification*) -----
     from catboost import CatBoostClassifier
-    from lightgbm import LGBMClassifier
     from xgboost import XGBClassifier
-    from sklearn.ensemble import ExtraTreesClassifier
-    from sklearn.linear_model import LogisticRegression
+    from lightgbm import LGBMClassifier
+    from sklearn.ensemble import (
+        ExtraTreesClassifier,
+        RandomForestClassifier,
+        HistGradientBoostingClassifier,
+        AdaBoostClassifier,
+        GradientBoostingClassifier,
+    )
+    from sklearn.linear_model  import (
+        LogisticRegression,
+        SGDClassifier,
+    )
+    from sklearn.svm           import SVC
+    from sklearn.neighbors     import KNeighborsClassifier
+    from sklearn.naive_bayes   import GaussianNB
+    from pytorch_tabnet.tab_model import TabNetClassifier
+    from imblearn.ensemble     import BalancedBaggingClassifier
+    import torch
 
     if l0_config == 'base':
         models = {
@@ -2806,26 +2821,6 @@ def main(rolling_train_length=2100,
     
     elif l0_config == 'v2':
         # ─── Imports ──────────────────────────────────────────────────────
-        from catboost import CatBoostClassifier
-        from lightgbm import LGBMClassifier
-        from xgboost  import XGBClassifier
-        from sklearn.ensemble import (
-            ExtraTreesClassifier,
-            RandomForestClassifier,
-            HistGradientBoostingClassifier,
-            AdaBoostClassifier,
-            GradientBoostingClassifier,
-        )
-        from sklearn.linear_model  import (
-            LogisticRegression,
-            SGDClassifier,
-        )
-        from sklearn.svm           import SVC
-        from sklearn.neighbors     import KNeighborsClassifier
-        from sklearn.naive_bayes   import GaussianNB
-        from pytorch_tabnet.tab_model import TabNetClassifier
-        from imblearn.ensemble     import BalancedBaggingClassifier
-        import torch
 
         # helper: class imbalance weight (≈1 if perfectly balanced)
         pos_weight = (1 - y_train.mean()) / y_train.mean()
