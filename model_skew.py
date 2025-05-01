@@ -2901,6 +2901,14 @@ def main(rolling_train_length=2100,
         # — compute metrics dict —
         metrics_list.append(single_model_metrics)
 
+        preds_df = pd.DataFrame(df_long["date"].iloc[split:])
+        preds_df["prediction"] = y_pred
+        preds_df["pred_proba"] = y_proba
+        preds_df["model"] = name
+        preds_df["uuid"] = uuid
+        preds_df["runtime"] = current_time
+        append_to_bigquery(preds_df, DESTINATION_DATASET, f'model-predictions')
+
     # ——— 4) flatten SHAP into list of dicts ——
     feat_names = feature_columns
     shap_summary = []
