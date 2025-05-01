@@ -2325,6 +2325,26 @@ def main(rolling_train_length=2100,
     from xgboost import XGBClassifier
     from sklearn.ensemble import ExtraTreesClassifier
     from sklearn.linear_model import LogisticRegression
+    from catboost import CatBoostClassifier
+    from lightgbm import LGBMClassifier
+    from xgboost  import XGBClassifier
+    from sklearn.ensemble import (
+        ExtraTreesClassifier,
+        RandomForestClassifier,
+        HistGradientBoostingClassifier,
+        AdaBoostClassifier,
+        GradientBoostingClassifier,
+    )
+    from sklearn.linear_model  import (
+        LogisticRegression,
+        SGDClassifier,
+    )
+    from sklearn.svm           import SVC
+    from sklearn.neighbors     import KNeighborsClassifier
+    from sklearn.naive_bayes   import GaussianNB
+    from pytorch_tabnet.tab_model import TabNetClassifier
+    from imblearn.ensemble     import BalancedBaggingClassifier
+    import torch
 
     if l0_config == 'base':
         models = {
@@ -2639,26 +2659,6 @@ def main(rolling_train_length=2100,
     
     elif l0_config == 'v2':
         # ─── Imports ──────────────────────────────────────────────────────
-        from catboost import CatBoostClassifier
-        from lightgbm import LGBMClassifier
-        from xgboost  import XGBClassifier
-        from sklearn.ensemble import (
-            ExtraTreesClassifier,
-            RandomForestClassifier,
-            HistGradientBoostingClassifier,
-            AdaBoostClassifier,
-            GradientBoostingClassifier,
-        )
-        from sklearn.linear_model  import (
-            LogisticRegression,
-            SGDClassifier,
-        )
-        from sklearn.svm           import SVC
-        from sklearn.neighbors     import KNeighborsClassifier
-        from sklearn.naive_bayes   import GaussianNB
-        from pytorch_tabnet.tab_model import TabNetClassifier
-        from imblearn.ensemble     import BalancedBaggingClassifier
-        import torch
 
         # helper: class imbalance weight (≈1 if perfectly balanced)
         pos_weight = (1 - y_train.mean()) / y_train.mean()
@@ -2871,6 +2871,14 @@ def main(rolling_train_length=2100,
         if isinstance(mdl, (CatBoostClassifier, XGBClassifier)):
             explainer = shap.TreeExplainer(mdl)
 
+        elif isinstance(mdl, (LogisticRegression, SGDClassifier)):
+            # linear models use LinearExplainer (fast, exact for linear)
+            # X_train acts as the "background" dataset
+            explainer = shap.LinearExplainer(
+                mdl,
+                X_train)
+
+
         # — compute SHAP on X_test —
         raw_shap = explainer.shap_values(X_test) #, nsamples=100)
         # if list of arrays ([neg, pos]), take pos‐class
@@ -2943,7 +2951,7 @@ def main(rolling_train_length=2100,
     df_l0_shap['uuid'] = uuid
 
     append_to_bigquery(df_l0_metrics, DESTINATION_DATASET, f'sub-meta-model-metrics')
-    append_to_bigquery(df_l0_metrics, DESTINATION_DATASET, f'sub-meta-model-shap')
+    append_to_bigquery(df_l0_shap, DESTINATION_DATASET, f'sub-meta-model-shap')
 
     # -------------------- 4. Simple equal‑weight ensemble ------------
     import numpy as np
