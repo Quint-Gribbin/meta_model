@@ -12,4 +12,3 @@ Notes
 * Add the Hudson Bay code Fractional Differentiation X
 * Additional (L1, L2) layers
 * 
-

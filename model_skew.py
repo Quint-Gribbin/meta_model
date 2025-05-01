@@ -3038,9 +3038,7 @@ def main(rolling_train_length=2100,
             # X_train acts as the "background" dataset
             explainer = shap.LinearExplainer(
                 mdl,
-                X_train,
-                feature_dependence="independent"  # assume features are independent
-            )
+                X_train)
 
         # — compute SHAP on X_test —
         raw_shap = explainer.shap_values(X_test) #, nsamples=100)
