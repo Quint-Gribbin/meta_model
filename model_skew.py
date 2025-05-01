@@ -50,6 +50,7 @@ def main(rolling_train_length=2100,
 
     YIELDS_TABLE = "issachar-feature-library.core_raw.factor_yields"
     INDEX_RETURNS_TABLE = "josh-risk.IssacharReporting.Index_Returns"
+    FLAT_BAND = 0.2 / 100 # 0.2% flat band for the model
 
     # Import key libraries
     import pandas as pd
@@ -3088,7 +3089,7 @@ def main(rolling_train_length=2100,
                 # average over days
                 'mean_shap'   : np.mean(vals),
                 # peak effect over days
-                'max_shap'    : np.max(vals),
+                'max_shap'    : np.max(np.abs(vals)),
                 # if you want absolute instead:
                 # 'mean_abs_shap': np.mean(np.abs(vals)),
                 # 'max_abs_shap' : np.max(np.abs(vals)),

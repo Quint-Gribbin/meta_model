@@ -11,4 +11,8 @@ Notes
 * Meta model probability ranges X
 * Add the Hudson Bay code Fractional Differentiation X
 * Additional (L1, L2) layers
-* 
+
+
+* Add runtime to model output
+* Test different lag horizons
+* Update the model to accommodate different target logic
