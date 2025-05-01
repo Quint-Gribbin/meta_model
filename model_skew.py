@@ -3120,6 +3120,14 @@ def main(rolling_train_length=2100,
     y_pred_proba = probas.mean(axis=1)                         # ensemble probability
     y_pred       = (y_pred_proba >= 0.5).astype(int)           # hard class
 
+    preds_df = pd.DataFrame(df_long["date"].iloc[split:])
+    preds_df["prediction"] = y_pred
+    preds_df["pred_proba"] = y_pred_proba
+    preds_df["model"] = "simple average"
+    preds_df["uuid"] = uuid
+    preds_df["runtime"] = current_time
+    append_to_bigquery(preds_df, DESTINATION_DATASET, f'model-predictions')
+
 
     ###################################################################################
     # 4. Evaluate the model performance
@@ -3297,6 +3305,14 @@ def main(rolling_train_length=2100,
     y_pred_proba = meta_cb.predict_proba(X_test_meta)[:, 1]
     y_pred       = (y_pred_proba >= 0.5).astype(int)
 
+    preds_df = pd.DataFrame(df_long["date"].iloc[split:])
+    preds_df["prediction"] = y_pred
+    preds_df["pred_proba"] = y_pred_proba
+    preds_df["model"] = "Meta Model with Data"
+    preds_df["uuid"] = uuid
+    preds_df["runtime"] = current_time
+    append_to_bigquery(preds_df, DESTINATION_DATASET, f'model-predictions')
+
     accuracy  = accuracy_score (y_test, y_pred)
     precision = precision_score(y_test, y_pred)
     recall    = recall_score   (y_test, y_pred)
@@ -3462,6 +3478,14 @@ def main(rolling_train_length=2100,
     # -------------------- 6.  Evaluate the stacked model -------------
     y_pred_proba = meta_cb.predict_proba(X_test_meta)[:, 1]
     y_pred       = (y_pred_proba >= 0.5).astype(int)
+
+    preds_df = pd.DataFrame(df_long["date"].iloc[split:])
+    preds_df["prediction"] = y_pred
+    preds_df["pred_proba"] = y_pred_proba
+    preds_df["model"] = "Meta Model"
+    preds_df["uuid"] = uuid
+    preds_df["runtime"] = current_time
+    append_to_bigquery(preds_df, DESTINATION_DATASET, f'model-predictions')
 
     accuracy  = accuracy_score (y_test, y_pred)
     precision = precision_score(y_test, y_pred)
