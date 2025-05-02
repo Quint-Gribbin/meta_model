@@ -72,8 +72,6 @@ def main(rolling_train_length=2100,
     import subprocess
     import pytz
     from datetime import datetime, timedelta
-    from google.api_core.exceptions import TooManyRequests
-    from google.api_core import retry as g_retry
 
     holdout_start = pd.to_datetime(holdout_start)
     current_time = pd.Timestamp.now()
@@ -107,28 +105,6 @@ def main(rolling_train_length=2100,
     set_random_seeds(random_seed)
 
     # Initialize the GCS clients
-
-    # ------------------------------------------------------------------
-    # Helper: predicate that tells Retry which errors are worth retrying
-    # ------------------------------------------------------------------
-    def _is_rate_limited(exc: Exception) -> bool:
-        if isinstance(exc, TooManyRequests):
-            return True
-        if (
-            hasattr(exc, "errors")
-            and any(e.get("reason") in ("rateLimitExceeded") for e in exc.errors)
-        ):
-            return True
-        return False
-
-
-    # Pre-configured Retry object (initial=1 s, max back-off=60 s, deadline=300 s)
-    BQ_RETRY = g_retry.Retry(
-        predicate=_is_rate_limited, initial=1.0, maximum=60.0, multiplier=2.0, deadline=300.0
-    )
-    
-
-    MAX_RETRIES = 6 
     PROJECT_ID = "issachar-feature-library"
     STAGING_BUCKET = "gs://qjg-test"
     DESTINATION_DATASET = "qjg_meta_model"
@@ -2143,8 +2119,7 @@ def main(rolling_train_length=2100,
         df: pd.DataFrame,
         dataset_id: str,
         table_name: str,
-        project_id: str = PROJECT_ID,
-        retry_policy: g_retry.Retry = BQ_RETRY,
+        project_id: str = PROJECT_ID
     ) -> None:
         """
         Append data to a BigQuery table, automatically creating the table if it
@@ -2165,7 +2140,8 @@ def main(rolling_train_length=2100,
                 df, 
                 table_id, 
                 job_config=job_config,
-                retry=retry_policy, 
+                num_retries=20,
+                timeout=5, 
             )
             load_job.result()
             logging.info(f"Appended data to table {table_id} successfully.")
