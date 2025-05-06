@@ -3156,7 +3156,6 @@ def main(rolling_train_length=2100,
             'f1'       : f1_score(y_test, y_pred),
             'roc_auc'  : roc_auc_score(y_test, y_proba),
             'brier'    : brier_score_loss(y_test, y_proba),
-            # ← you could also add 'log_loss': log_loss(y_test, y_proba)
         }
 
         print(single_model_metrics)
@@ -3165,7 +3164,7 @@ def main(rolling_train_length=2100,
         metrics_df, agg_df, preds_df = rolling_backtest(
             X.set_index(df_long['date']),
             y,
-            freq="M",                # e.g. "M", "W", "D", etc.
+            freq="W",                # e.g. "M", "W", "D", etc.
             start_test_date="2022-01-03",
             model_cls=mdl,
         )
