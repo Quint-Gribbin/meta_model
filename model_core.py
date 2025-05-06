@@ -75,7 +75,7 @@ def main(rolling_train_length=2100,
     holdout_start = pd.to_datetime(holdout_start)
     current_time = pd.Timestamp.now()
     uuid = str(current_time) + "__model=Meta_Model__" + "__".join(f"{key}={value}" for key, value in args.items())
-    
+
     # Google Cloud imports
     from google.cloud import bigquery, storage
     # from google.api_core.exceptions import NotFound
@@ -3025,8 +3025,100 @@ def main(rolling_train_length=2100,
     metrics_list = []
     shap_values_dict = {}   # temporary storage of raw arrays
 
+    from tqdm import tqdm
+    def rolling_backtest(
+        X: pd.DataFrame,
+        y: pd.Series,
+        initial_train_fraction: float = 0.80,
+        freq: str = "M",
+        start_test_date: str | pd.Timestamp = "2022-01-01",
+        model_cls=KNeighborsClassifier,
+        model_kwargs: dict | None = None,
+        log_level: int = logging.INFO,
+    ):
+        # Setup logging
+        logging.basicConfig(level=log_level, format="[%(asctime)s] %(message)s")
+        log = logging.getLogger(__name__)
+
+        # Ensure datetime index
+        if not isinstance(X.index, pd.DatetimeIndex):
+            X = X.copy()
+            X.index = pd.to_datetime(X.index)
+        y.index = X.index
+        # X = X.sort_index()
+        # y = y.reindex(X.index)
+
+        # print(X.head())
+
+        # Create period labels
+        periods = X.index.to_period(freq)
+        unique_periods = periods.unique()
+
+        # Determine split point
+        split_idx = int(len(unique_periods) * initial_train_fraction)
+        start_cutoff = pd.Period(start_test_date, freq=freq)
+
+        # Select test periods
+        test_periods = [p for p in unique_periods[split_idx:] if p.start_time >= pd.Timestamp(start_test_date)][0:10]
+
+        metrics = []
+        preds = []
+
+        for p in tqdm(test_periods, desc=f"Back-test ({freq})"):
+            train_mask = periods < p
+            test_mask = periods == p
+            if not test_mask.any():
+                continue
+
+            X_train = X.loc[train_mask]
+            y_train = y.loc[train_mask]
+            X_test = X.loc[test_mask]
+            y_test = y.loc[test_mask]
+
+            # Fit model
+            model_cls.fit(X_train, y_train)
+
+            # Predict
+            y_pred = mdl.predict(X_test)
+            y_proba = mdl.predict_proba(X_test)[:, 1]
+
+            # Log
+            log.info("Test %s – train %s, test %s", p, len(y_train), len(y_test))
+
+            # Collect metrics
+            metrics.append({
+                "period": str(p),
+                "n_test": len(y_test),
+                "accuracy": accuracy_score(y_test, y_pred),
+                "precision": precision_score(y_test, y_pred, zero_division=0),
+                "recall": recall_score(y_test, y_pred, zero_division=0),
+                "f1": f1_score(y_test, y_pred, zero_division=0),
+                "roc_auc": roc_auc_score(y_test, y_proba),
+                "brier": brier_score_loss(y_test, y_proba),
+            })
+
+            preds.append(
+                pd.DataFrame({
+                    # "date": X_test.index,
+                    "period": str(p),
+                    "prediction": y_pred,
+                    "pred_proba": y_proba,
+                    "y_test": y_test.values,
+                }, index=X_test.index)
+            )
+
+        print(metrics)
+        metrics_df = pd.DataFrame(metrics)
+        aggregate = metrics_df[["accuracy","precision","recall","f1","roc_auc","brier"]].mean().to_dict()
+        preds_df = pd.concat(preds).sort_index().reset_index(drop=False)
+
+        return metrics_df, aggregate, preds_df
+    
+
+
     # ——— 3) loop over models ——
     for name, mdl in models.items():
+        model_start = time.time()
         mdl.fit(X_train, y_train)
         print(f"{name} fitted")
 
@@ -3043,14 +3135,14 @@ def main(rolling_train_length=2100,
                 X_train)
 
         # — compute SHAP on X_test —
-        raw_shap = explainer.shap_values(X_test) #, nsamples=100)
-        # if list of arrays ([neg, pos]), take pos‐class
-        if isinstance(raw_shap, list):
-            raw_shap = raw_shap[1]
-        shap_values_dict[name] = raw_shap
-        print(f"{name} SHAP values done")
-        print(f"Time to compute SHAP values: {time.time() - now}")
-
+        if isinstance(mdl,  (CatBoostClassifier, XGBClassifier, LogisticRegression, SGDClassifier)):
+            raw_shap = explainer.shap_values(X_test) #, nsamples=100)
+            # if list of arrays ([neg, pos]), take pos‐class
+            if isinstance(raw_shap, list):
+                raw_shap = raw_shap[1]
+            shap_values_dict[name] = raw_shap
+            print(f"{name} SHAP values done")
+            print(f"Time to compute SHAP values: {time.time() - now}")
 
         # — compute preds & probabilities —
         y_pred  = mdl.predict(X_test)
@@ -3068,9 +3160,22 @@ def main(rolling_train_length=2100,
         }
 
         print(single_model_metrics)
+        print(f"Time to compute 80/20 model {name}: {time.time() - model_start}")
+
+        metrics_df, agg_df, preds_df = rolling_backtest(
+            X.set_index(df_long['date']),
+            y,
+            freq="M",                # e.g. "M", "W", "D", etc.
+            start_test_date="2022-01-03",
+            model_cls=mdl,
+        )
+
+        agg_df['model'] = name
+
+        print(agg_df)
 
         # — compute metrics dict —
-        metrics_list.append(single_model_metrics)
+        metrics_list.append(agg_df)
         preds_df = pd.DataFrame(df_long["date"].iloc[split:])
         preds_df["prediction"] = y_pred
         preds_df["pred_proba"] = y_proba
@@ -3078,6 +3183,7 @@ def main(rolling_train_length=2100,
         preds_df["uuid"] = uuid
         preds_df["runtime"] = current_time
         append_to_bigquery(preds_df, DESTINATION_DATASET, f'model-predictions')
+        print(f"Time to compute whole model {name}: {time.time() - model_start}")
 
     # ——— 4) flatten SHAP into list of dicts ——
     feat_names = feature_columns
@@ -3151,7 +3257,7 @@ def main(rolling_train_length=2100,
     print("Confusion matrix:\n", confusion_matrix(y_test, y_pred))
 
     ensemble = "simple average"
-    metrics_df = sanitize_and_convert_columns(pd.DataFrame([{"accuracy":accuracy, "precision":precision, "recall":recall, "f1":f1, "roc_auc":roc_auc, "brier": brier, "ensemble":ensemble, 'uuid':uuid}]))
+    metrics_df = sanitize_and_convert_columns(pd.DataFrame([{"accuracy":accuracy, "precision":precision, "recall":recall, "f1":f1, "roc_auc":roc_auc, "brier": brier, "ensemble":ensemble, 'uuid':uuid, 'runtime':current_time}]))
     print(metrics_df)
     append_to_bigquery(metrics_df, DESTINATION_DATASET, f'meta_model_metrics_{table_suffix}')
 
@@ -3331,7 +3437,7 @@ def main(rolling_train_length=2100,
     print("Confusion matrix:\n", confusion_matrix(y_test, y_pred))
 
     ensemble = "Meta CatBoost with base models and original data"
-    metrics_df = sanitize_and_convert_columns(pd.DataFrame([{"accuracy":accuracy, "precision":precision, "recall":recall, "f1":f1, "roc_auc":roc_auc, "brier": brier, "ensemble":ensemble, 'uuid':uuid}]))
+    metrics_df = sanitize_and_convert_columns(pd.DataFrame([{"accuracy":accuracy, "precision":precision, "recall":recall, "f1":f1, "roc_auc":roc_auc, "brier": brier, "ensemble":ensemble, 'uuid':uuid, 'runtime':current_time}]))
     print(metrics_df)
     append_to_bigquery(metrics_df, DESTINATION_DATASET, f'meta_model_metrics_{table_suffix}')
 
@@ -3506,7 +3612,7 @@ def main(rolling_train_length=2100,
 
     ensemble = "Meta CatBoost without base data"
     print(metrics_df)
-    metrics_df = sanitize_and_convert_columns(pd.DataFrame([{"accuracy":accuracy, "precision":precision, "recall":recall, "f1":f1, "roc_auc":roc_auc, "brier": brier, "ensemble":ensemble, 'uuid':uuid}]))
+    metrics_df = sanitize_and_convert_columns(pd.DataFrame([{"accuracy":accuracy, "precision":precision, "recall":recall, "f1":f1, "roc_auc":roc_auc, "brier": brier, "ensemble":ensemble, 'uuid':uuid, 'runtime':current_time}]))
     append_to_bigquery(metrics_df, DESTINATION_DATASET, f'meta_model_metrics_{table_suffix}')
 
     # -------------------- 6.  Diagnostic plots -----------------------

@@ -16,3 +16,11 @@ Notes
 * Add runtime to model output
 * Test different lag horizons
 * Update the model to accommodate different target logic
+
+
+
+
+
+This is the actual paper backtest
+https://console.cloud.google.com/vertex-ai/colab/notebooks?inv=1&invt=AbwqdQ&project=issachar-feature-library&activeNb=projects%2Fissachar-feature-library%2Flocations%2Fus-east4%2Frepositories%2F8d052d55-544b-4732-86f0-dd0d12f741e4
+https://console.cloud.google.com/vertex-ai/colab/notebooks?inv=1&invt=AbwqdQ&project=issachar-feature-library&activeNb=projects%2Fissachar-feature-library%2Flocations%2Fus-east4%2Frepositories%2F29d46d5d-21c3-4731-aa0b-2a766ebebb1f
