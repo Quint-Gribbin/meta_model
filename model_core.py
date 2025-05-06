@@ -2521,18 +2521,18 @@ def main(rolling_train_length=2100,
                 iterations=800,
                 verbose=False
             ),
-            "LightGBM" : LGBMClassifier(
-                objective="binary",
-                boosting_type="dart",
-                learning_rate=0.02,
-                drop_rate=0.2,
-                subsample=0.8,
-                feature_fraction=0.8,
-                max_depth=-1,
-                device="cpu",
-                seed=42,
-                n_estimators=800
-            ),
+            # "LightGBM" : LGBMClassifier(
+            #     objective="binary",
+            #     boosting_type="dart",
+            #     learning_rate=0.02,
+            #     drop_rate=0.2,
+            #     subsample=0.8,
+            #     feature_fraction=0.8,
+            #     max_depth=-1,
+            #     device="cpu",
+            #     seed=42,
+            #     n_estimators=800
+            # ),
             "XGBoost": XGBClassifier(
                 objective="binary:logistic",
                 n_estimators=1000,
@@ -2632,23 +2632,23 @@ def main(rolling_train_length=2100,
             ),
 
             # 2) Gradient-boosting with GOSS sampling
-            "LightGBM_GOSS": LGBMClassifier(
-                boosting_type      = "goss",
-                objective          = "binary",
-                metric             = "auc",
-                num_leaves         = 63,             # ≈ 2^(max_depth)
-                max_depth          = -1,
-                learning_rate      = 0.015,
-                n_estimators       = 2500,
-                feature_fraction   = 0.9,
-                bagging_fraction   = 0.9,
-                bagging_freq       = 0,
-                min_child_samples  = 20,
-                lambda_l1          = 1e-2,
-                lambda_l2          = 1e-1,
-                random_state       = RANDOM_STATE,
-                device             = "cpu"
-            ),
+            # "LightGBM_GOSS": LGBMClassifier(
+            #     boosting_type      = "goss",
+            #     objective          = "binary",
+            #     metric             = "auc",
+            #     num_leaves         = 63,             # ≈ 2^(max_depth)
+            #     max_depth          = -1,
+            #     learning_rate      = 0.015,
+            #     n_estimators       = 2500,
+            #     feature_fraction   = 0.9,
+            #     bagging_fraction   = 0.9,
+            #     bagging_freq       = 0,
+            #     min_child_samples  = 20,
+            #     lambda_l1          = 1e-2,
+            #     lambda_l2          = 1e-1,
+            #     random_state       = RANDOM_STATE,
+            #     device             = "cpu"
+            # ),
 
             # 3) XGBoost histogram
             "XGBoost_hist": XGBClassifier(
@@ -2701,18 +2701,18 @@ def main(rolling_train_length=2100,
                     iterations=800,
                     verbose=False
                 ),
-                "LightGBM" : LGBMClassifier(
-                    objective="binary",
-                    boosting_type="dart",
-                    learning_rate=0.02,
-                    drop_rate=0.2,
-                    subsample=0.8,
-                    feature_fraction=0.8,
-                    max_depth=-1,
-                    device="cpu",
-                    seed=42,
-                    n_estimators=800
-                ),
+                # "LightGBM" : LGBMClassifier(
+                #     objective="binary",
+                #     boosting_type="dart",
+                #     learning_rate=0.02,
+                #     drop_rate=0.2,
+                #     subsample=0.8,
+                #     feature_fraction=0.8,
+                #     max_depth=-1,
+                #     device="cpu",
+                #     seed=42,
+                #     n_estimators=800
+                # ),
                 "XGBoost": XGBClassifier(
                     objective="binary:logistic",
                     n_estimators=1000,
@@ -2851,24 +2851,24 @@ def main(rolling_train_length=2100,
                 task_type           = "CPU"
             ),
 
-            "LightGBM_DART": LGBMClassifier(
-                boosting_type       = "dart",
-                objective           = "binary",
-                metric              = "auc",
-                num_leaves          = 255,
-                learning_rate       = 0.007,
-                n_estimators        = 6000,
-                feature_fraction    = 0.85,
-                bagging_fraction    = 0.8,
-                drop_rate           = 0.05,
-                skip_drop           = 0.4,
-                min_child_samples   = 25,
-                lambda_l1           = 5e-3,
-                lambda_l2           = 5e-2,
-                scale_pos_weight    = pos_weight,
-                random_state        = RANDOM_STATE,
-                device              = "cpu"
-            ),
+            # "LightGBM_DART": LGBMClassifier(
+            #     boosting_type       = "dart",
+            #     objective           = "binary",
+            #     metric              = "auc",
+            #     num_leaves          = 255,
+            #     learning_rate       = 0.007,
+            #     n_estimators        = 6000,
+            #     feature_fraction    = 0.85,
+            #     bagging_fraction    = 0.8,
+            #     drop_rate           = 0.05,
+            #     skip_drop           = 0.4,
+            #     min_child_samples   = 25,
+            #     lambda_l1           = 5e-3,
+            #     lambda_l2           = 5e-2,
+            #     scale_pos_weight    = pos_weight,
+            #     random_state        = RANDOM_STATE,
+            #     device              = "cpu"
+            # ),
 
             "XGBoost_hist": XGBClassifier(
                 objective           = "binary:logistic",
@@ -3030,7 +3030,7 @@ def main(rolling_train_length=2100,
         X: pd.DataFrame,
         y: pd.Series,
         initial_train_fraction: float = 0.80,
-        freq: str = "M",
+        freq: str = "W",
         start_test_date: str | pd.Timestamp = "2022-01-01",
         model_cls=KNeighborsClassifier,
         model_kwargs: dict | None = None,
