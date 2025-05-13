@@ -3337,7 +3337,7 @@ def main(rolling_train_length=2100,
         metrics_df, agg_df, preds_df = rolling_backtest_period(
             X.set_index(df_long['date']),
             y_temp,
-            period_length=5,                # e.g. "M", "W", "D", etc.
+            period_length=rolling_window,                # e.g. "M", "W", "D", etc.
             start_test_date="2022-01-03",
             model_cls=mdl    )
 
