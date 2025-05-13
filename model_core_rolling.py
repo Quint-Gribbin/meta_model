@@ -36,6 +36,7 @@ def main(rolling_train_length=2100,
         core_model_column="long_return",
         l0_config="base",
         use_rank_features=1,
+        rolling_window=20,
 ):
     args = locals().copy()
     args.pop("cluster_df")
@@ -71,8 +72,6 @@ def main(rolling_train_length=2100,
     import subprocess
     import pytz
     from datetime import datetime, timedelta
-    import re
-    from tqdm import tqdm
 
     holdout_start = pd.to_datetime(holdout_start)
     current_time = pd.Timestamp.now()
@@ -89,7 +88,7 @@ def main(rolling_train_length=2100,
 
     # Run the command and capture output
     result = subprocess.run(
-        ['curl', '-H', 'Metadata-Flavor: Google', 
+        ['curl', '-H', 'Metadata-Flavor: Google',
         'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email'],
         capture_output=True,
         text=True
@@ -216,7 +215,7 @@ def main(rolling_train_length=2100,
                     ON
                         mfr.date = mfa.date
                     ORDER BY
-                        mfr.date DESC
+                        mfr.date
             '''
 
     df_factors = read_table_to_dataframe(bigquery.Client(project="issachar-feature-library"), "issachar-feature-library.qjg.macro_factor_returns", factor_query).fillna(0)
@@ -2136,11 +2135,11 @@ def main(rolling_train_length=2100,
 
         try:
             load_job = client.load_table_from_dataframe(
-                df, 
-                table_id, 
+                df,
+                table_id,
                 job_config=job_config,
                 num_retries=20,
-                timeout=5, 
+                timeout=5,
             )
             load_job.result()
             logging.info(f"Appended data to table {table_id} successfully.")
@@ -2433,12 +2432,12 @@ def main(rolling_train_length=2100,
         plt.axhline(results['95% conf'].mean(), linewidth=1, color='r', linestyle='dotted')
 
         return plot
-    
+
     series = pd.DataFrame({"close":df_long["lag1_price"].values}, index=df_long["date"].values).iloc[1:]
     ds = [0.3, 0.5, 0.7]
     features = pd.concat(
         [frac_diff_ffd(series[['close']], diff_amt=d, thresh=0.01)
-            .rename(columns=lambda c: f"{c}_fd{d}") 
+            .rename(columns=lambda c: f"{c}_fd{d}")
         for d in ds],
         axis=1
     ).dropna()
@@ -2449,10 +2448,10 @@ def main(rolling_train_length=2100,
     # 3) Add the features to the main dataframe
 
     df_long['positive_return'] = df_long['returns'].apply(lambda x: 0 if x < 0 else 1)
-    # df_long['positive_return'] = df_long['returns'].shift(-4).apply(lambda x: 0 if x < 0 else 1)
+    # df_long['positive_return'] = df_long['returns'].shift(-4).apply(lambda x: 0 if x < 0 else 1
 
     X = df_long[feature_columns]
-    y = df_long["positive_return"]
+    y = df_long["returns"]
 
     # -------------------- 2. Chronological train / test split --------
     split = int(len(X)*0.8)                          # 80 / 20 time‑ordered split
@@ -2501,6 +2500,7 @@ def main(rolling_train_length=2100,
         AdaBoostClassifier,
         GradientBoostingClassifier,
     )
+
     from sklearn.linear_model  import (
         LogisticRegression,
         SGDClassifier,
@@ -2514,104 +2514,81 @@ def main(rolling_train_length=2100,
 
     if l0_config == 'base':
         models = {
-            "CatBoost" : CatBoostClassifier(
-                loss_function="Logloss",
-                random_seed=42,
-                task_type="CPU",
-                depth=8,
-                learning_rate=0.03,
-                iterations=800,
-                verbose=False
-            ),
-            # "LightGBM" : LGBMClassifier(
-            #     objective="binary",
-            #     boosting_type="dart",
-            #     learning_rate=0.02,
-            #     drop_rate=0.2,
-            #     subsample=0.8,
-            #     feature_fraction=0.8,
-            #     max_depth=-1,
-            #     device="cpu",
-            #     seed=42,
-            #     n_estimators=800
-            # ),
-            "XGBoost": XGBClassifier(
-                objective="binary:logistic",
-                n_estimators=1000,
-                learning_rate=0.01,
-                tree_method="hist",       # GPU‑accelerated histogram algorithm
-                # predictor="gpu_predictor",    # GPU for prediction, too
-                # gpu_id=0,                     # which GPU to use
-                # use_label_encoder=False,      # disable legacy label encoder
-                verbosity=0,                  # silent
-                random_state=42,
-                device="cpu"
-            ),
-            "XGBoost2": XGBClassifier(
-            objective="binary:logistic",
-            # -------------------
-            # Core boosting
-            n_estimators=2000,          # more rounds to compensate for stronger regularization
-            learning_rate=0.01,         # slightly higher than 0.005 to converge faster
-            # -------------------
-            # Tree complexity
-            max_depth=8,                # capture richer patterns, but not too deep
-            min_child_weight=5,         # minimum sum hessian in leaf to avoid over‑fitting small samples
-            gamma=1.0,                  # require a 1.0 loss reduction to make a split
-            # -------------------
-            # Randomness for bagging
-            subsample=0.8,              # row subsampling per tree
-            colsample_bytree=0.8,       # feature subsampling per tree
-            # -------------------
-            # Regularization
-            reg_alpha=0.1,              # L1 regularization
-            reg_lambda=1.0,             # L2 regularization
-            # -------------------
-            # GPU settings
+                "XGBoost": XGBClassifier(
+            objective="multi:softprob",    # multiclass probability output
+            num_class=3,                   # three target labels
+            n_estimators=1000,
+            learning_rate=0.01,
             tree_method="hist",
-            # predictor="gpu_predictor",
-            # gpu_id=0,
-            # -------------------
-            # Misc
             # use_label_encoder=False,
-            eval_metric="auc",          # optimize for area‑under‑ROC
+            eval_metric="mlogloss",        # multiclass log‐loss
             random_state=42,
-            verbosity=1,
+            verbosity=0,
             device="cpu"
         ),
-            "XGBoost3": XGBClassifier(
-            objective="binary:logistic",
-            # -------------------
-            # Core boosting
-            n_estimators=2000,          # more rounds to compensate for stronger regularization
-            learning_rate=0.001,         # slightly higher than 0.005 to converge faster
-            # -------------------
-            # Tree complexity
-            max_depth=18,                # capture richer patterns, but not too deep
-            min_child_weight=5,         # minimum sum hessian in leaf to avoid over‑fitting small samples
-            gamma=1.0,                  # require a 1.0 loss reduction to make a split
-            # -------------------
-            # Randomness for bagging
-            subsample=0.9,              # row subsampling per tree
-            colsample_bytree=0.9,       # feature subsampling per tree
-            # -------------------
-            # Regularization
-            reg_alpha=0.1,              # L1 regularization
-            reg_lambda=1.0,             # L2 regularization
-            # -------------------
-            # GPU settings
-            tree_method="hist",
-            # predictor="gpu_predictor",
-            # gpu_id=0,
-            # -------------------
-            # Misc
-            # use_label_encoder=False,
-            eval_metric="auc",          # optimize for area‑under‑ROC
-            random_state=42,
-            verbosity=1,
-            device="cpu"
-        ),
-        }
+        # "CatBoost": CatBoostClassifier(
+        #     loss_function="MultiClass",   # multiclass loss
+        #     random_seed=42,
+        #     task_type="CPU",
+        #     depth=8,
+        #     learning_rate=0.03,
+        #     iterations=800,
+        #     verbose=False
+        # ),
+        # If you decide to re-enable LightGBM:
+        # "LightGBM": LGBMClassifier(
+        #     objective="multiclass",
+        #     num_class=3,
+        #     boosting_type="dart",
+        #     learning_rate=0.02,
+        #     drop_rate=0.2,
+        #     subsample=0.8,
+        #     feature_fraction=0.8,
+        #     max_depth=-1,
+        #     device="cpu",
+        #     seed=42,
+        #     n_estimators=800,
+        #     metric="multi_logloss"
+        # ),
+        # "XGBoost2": XGBClassifier(
+        #     objective="multi:softprob",
+        #     num_class=3,
+        #     n_estimators=2000,
+        #     learning_rate=0.01,
+        #     max_depth=8,
+        #     min_child_weight=5,
+        #     gamma=1.0,
+        #     subsample=0.8,
+        #     colsample_bytree=0.8,
+        #     reg_alpha=0.1,
+        #     reg_lambda=1.0,
+        #     tree_method="hist",
+        #     # use_label_encoder=False,
+        #     eval_metric="mlogloss",
+        #     random_state=42,
+        #     verbosity=1,
+        #     device="cpu"
+        # ),
+        # "XGBoost3": XGBClassifier(
+        #     objective="multi:softprob",
+        #     num_class=3,
+        #     n_estimators=2000,
+        #     learning_rate=0.001,
+        #     max_depth=18,
+        #     min_child_weight=5,
+        #     gamma=1.0,
+        #     subsample=0.9,
+        #     colsample_bytree=0.9,
+        #     reg_alpha=0.1,
+        #     reg_lambda=1.0,
+        #     tree_method="hist",
+        #     # use_label_encoder=False,
+        #     eval_metric="mlogloss",
+        #     random_state=42,
+        #     verbosity=1,
+        #     device="cpu"
+        # ),
+    }
 
     elif l0_config == 'base++':
         models = {
@@ -2822,7 +2799,7 @@ def main(rolling_train_length=2100,
             verbose           = 10,
             device_name       = "cpu"      # switch to "cuda" if available
         )
-    
+
     elif l0_config == 'v2':
         # ─── Imports ──────────────────────────────────────────────────────
 
@@ -3027,148 +3004,342 @@ def main(rolling_train_length=2100,
     metrics_list = []
     shap_values_dict = {}   # temporary storage of raw arrays
 
-    from tqdm import tqdm
-    def rolling_backtest(
+    # --------------------------------------------------------------------------- #
+    # Helper: convert "W", "2W", "M", "Q", … → business‑day window length
+    # --------------------------------------------------------------------------- #
+    def _freq_to_window(freq: str) -> int:
+        m = re.fullmatch(r"(\d+)?([A-Za-z]+)", freq)
+        if m is None:                             # pragma: no cover
+            raise ValueError(f"Unrecognised freq string: {freq}")
+
+        mult_str, code = m.groups()
+        mult = int(mult_str) if mult_str else 1
+        code = code.upper()
+
+        base = {
+            "D": 1,   # calendar day     – assumes returns are only present on B‑days
+            "B": 1,   # business day
+            "W": 5,   # one calendar week ≈ five trading days
+            "M": 20,  # one calendar month ≈ twenty trading days
+            "Q": 60,  # quarter  ≈ three months
+            "A": 252  # year     ≈ 252 trading days
+        }
+        if code not in base:                      # pragma: no cover
+            raise ValueError(f"Unsupported base freq: {code}")
+
+        return mult * base[code]
+
+    import logging
+    from typing import Tuple, List, Union, Optional, Dict, Any
+    import copy
+    from sklearn.preprocessing import label_binarize, LabelEncoder
+    from sklearn.base import clone
+
+    def rolling_backtest_period(
         X: pd.DataFrame,
-        y: pd.Series,
+        y_cont: pd.Series,  # 1‑day ahead *continuous* returns
+        *,
         initial_train_fraction: float = 0.80,
-        freq: str = "W",
+        period_length: int = 5,  # ⬅️ EXACT *row* count per chunk (trading‑day hop)
         start_test_date: str | pd.Timestamp = "2022-01-01",
         model_cls=KNeighborsClassifier,
-        model_kwargs: dict | None = None,
+        model_kwargs: Optional[Dict[str, Any]] = None,
         log_level: int = logging.INFO,
+        neg_thresh: float = -0.002,  # −0.2 %
+        pos_thresh: float = 0.002,  # +0.2 %
     ):
-        # Setup logging
-        logging.basicConfig(level=log_level, format="[%(asctime)s] %(message)s")
-        log = logging.getLogger(__name__)
+        """Rolling classification back‑test using *fixed‑size hopping windows*.
 
-        # Ensure datetime index
+        Each *chunk* consists of exactly ``period_length`` **consecutive rows** of *trading‑day* data
+        (weekends/holidays are simply absent).  The timeline is cut into these non‑overlapping
+        windows starting from the very first observation; the final, incomplete window (if any) is
+        ignored so that *all* train / test chunks contain ``period_length`` observations.
+
+        The target is the mean return over the *next* ``period_length`` rows, mapped into three
+        classes:
+
+        ======  ================================
+        class   condition on mean period return
+        ======  ================================
+        0     mean <= ``neg_thresh``
+        1     ``neg_thresh`` < mean < ``pos_thresh``
+        2     mean >= ``pos_thresh``
+        ======  ================================
+
+        Parameters
+        ----------
+        X, y_cont
+            Feature matrix and 1‑day ahead *continuous* returns; indices must align and be a
+            ``DatetimeIndex``.
+        initial_train_fraction
+            Fraction of full chunks reserved for the initial training sample.
+        period_length
+            Fixed size (in *rows*) of each hopping window.
+        start_test_date
+            Earliest *chunk* start date allowed in the test sequence.
+        model_cls / model_kwargs
+            Either an estimator class plus kwargs or an already‑instantiated estimator.
+        log_level
+            Logging verbosity.
+        neg_thresh, pos_thresh
+            Class boundary thresholds (see table above).
+
+        Returns
+        -------
+        metrics_df : pd.DataFrame
+            Per‑chunk evaluation metrics.
+        aggregate : dict[str, float]
+            Mean of all numeric metrics across chunks.
+        preds_df : pd.DataFrame
+            Row‑level predictions with class probabilities.
+        """
+
+        if period_length < 1:
+            raise ValueError("period_length must be >= 1 row")
+
+        # ---------- build the period‑ahead target ------------------------------
+        period_mean = (
+            y_cont.rolling(period_length).mean().shift(-(period_length)).dropna()
+        )
+        y = (
+            pd.cut(
+                period_mean,
+                bins=[-np.inf, neg_thresh, pos_thresh, np.inf],
+                labels=[0, 1, 2],
+                include_lowest=True,
+            )
+            .astype(int)
+            .rename("class")
+        )
+
+        # ---------- align features ---------------------------------------------
+        X = X.loc[y.index]
         if not isinstance(X.index, pd.DatetimeIndex):
             X = X.copy()
             X.index = pd.to_datetime(X.index)
         y.index = X.index
-        # X = X.sort_index()
-        # y = y.reindex(X.index)
 
-        # print(X.head())
+        # ---------- logging setup ----------------------------------------------
+        logging.basicConfig(level=log_level, format="[%(asctime)s] %(message)s")
+        log = logging.getLogger(__name__)
 
-        # Create period labels
-        periods = X.index.to_period(freq)
-        unique_periods = periods.unique()
+        # ---------- derive *row‑based* chunk identifiers -----------------------
+        n_rows = len(X)
+        full_chunks = n_rows // period_length  # ignore trailing partial chunk
 
-        # Determine split point
-        split_idx = int(len(unique_periods) * initial_train_fraction)
-        start_cutoff = pd.Period(start_test_date, freq=freq)
+        if full_chunks < 2:
+            raise ValueError("Not enough data to form at least two full chunks.")
 
-        # Select test periods
-        test_periods = [p for p in unique_periods[split_idx:] if p.start_time >= pd.Timestamp(start_test_date)][0:10]
+        chunk_id = np.arange(n_rows) // period_length
+        chunk_id = chunk_id.astype(int)
 
-        metrics = []
-        preds = []
+        # Mask to discard rows belonging to an incomplete tail chunk (if present)
+        valid_mask = chunk_id < full_chunks
+        X = X.loc[valid_mask]
+        y = y.loc[valid_mask]
+        chunk_id = chunk_id[valid_mask]
 
-        for p in tqdm(test_periods, desc=f"Back-test ({freq})"):
-            train_mask = periods < p
-            test_mask = periods == p
-            if not test_mask.any():
-                continue
+        chunk_starts = {
+            cid: X.index[cid * period_length] for cid in range(full_chunks)
+        }
 
-            X_train = X.loc[train_mask]
-            y_train = y.loc[train_mask]
+        # ---------- split into initial‑train / rolling sequence ----------------
+        split_idx = int(full_chunks * initial_train_fraction)
+        start_test_date = pd.to_datetime(start_test_date)
+
+        test_chunks = [
+            cid
+            for cid in range(split_idx, full_chunks)
+            if chunk_starts[cid] >= start_test_date
+        ]
+
+        log.info("Class dispersion (entire sample):\n%s", y.value_counts())
+
+        # ---------- instantiate / prepare model --------------------------------
+        if isinstance(model_cls, type):
+            model = model_cls(**(model_kwargs or {}))
+        else:
+            model = model_cls
+
+        classes = [0, 1, 2]
+        metrics, preds = [], []
+
+        # rows to keep for *rolling* 4‑year look‑back (~252 trading days per yr)
+        rows_per_year = 252
+        lookback_rows = rows_per_year * 4
+
+        for cid in tqdm(test_chunks, desc=f"Back‑test ({period_length}‑row hop)"):
+            train_mask = chunk_id < cid
+            test_mask = chunk_id == cid
+
+            X_train = X.loc[train_mask].tail(lookback_rows)
+            y_train = y.loc[train_mask].tail(lookback_rows)
             X_test = X.loc[test_mask]
             y_test = y.loc[test_mask]
 
-            # Fit model
-            model_cls.fit(X_train, y_train)
+            # print("\nValue Counts for Train\n")
+            # print(y_train.value_counts())
 
-            # Predict
-            y_pred = mdl.predict(X_test)
-            y_proba = mdl.predict_proba(X_test)[:, 1]
+            # print("\nValue Counts for Test\n")
+            # print(y_test.value_counts())
 
-            # Log
-            log.info("Test %s – train %s, test %s", p, len(y_train), len(y_test))
+            if X_test.empty:
+                continue  # safety – should not happen with strict chunk sizing
 
-            # Collect metrics
-            metrics.append({
-                "period": str(p),
-                "n_test": len(y_test),
-                "accuracy": accuracy_score(y_test, y_pred),
-                "precision": precision_score(y_test, y_pred, zero_division=0),
-                "recall": recall_score(y_test, y_pred, zero_division=0),
-                "f1": f1_score(y_test, y_pred, zero_division=0),
-                "roc_auc": roc_auc_score(y_test, y_proba),
-                "brier": brier_score_loss(y_test, y_proba),
-            })
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+            y_proba = model.predict_proba(X_test)
 
-            preds.append(
-                pd.DataFrame({
-                    # "date": X_test.index,
-                    "period": str(p),
-                    "prediction": y_pred,
-                    "pred_proba": y_proba,
-                    "y_test": y_test.values,
-                }, index=X_test.index)
+            predicted_classes = pd.Series(y_pred.ravel()).unique()
+            missing_classes = set(classes) - set(predicted_classes)
+            if (len(missing_classes) >= 1) and (y_proba.shape[1] !=3):
+                y_proba = [list(x) for x in y_proba]
+                for missed_class in missing_classes:
+                    for row in y_proba:
+                        row.insert(missed_class,0)
+                y_proba = np.array(y_proba)
+
+            # ---- evaluation metrics ------------------------------------------
+            y_test_ohe = label_binarize(y_test, classes=classes)
+
+            metrics.append(
+                {
+                    "period": str(chunk_starts[cid].date()),
+                    "n_test": len(y_test),
+                    "accuracy": accuracy_score(y_test, y_pred),
+                    "precision": precision_score(
+                        y_test,
+                        y_pred,
+                        labels=classes,
+                        average="macro",
+                        zero_division=0,
+                    ),
+                    "recall": recall_score(
+                        y_test,
+                        y_pred,
+                        labels=classes,
+                        average="macro",
+                        zero_division=0,
+                    ),
+                    "f1": f1_score(
+                        y_test,
+                        y_pred,
+                        labels=classes,
+                        average="macro",
+                        zero_division=0,
+                    ),
+                    "roc_auc_ovr": roc_auc_score(
+                        y_test_ohe, y_proba, multi_class="ovr", average="macro"
+                    ),
+                    "roc_auc_ovo": roc_auc_score(
+                        y_test_ohe, y_proba, multi_class="ovo", average="macro"
+                    ),
+                }
             )
 
-        print(metrics)
+            print("\n #### Evaluation Metrics")
+            print("Missing Classes:", (len(missing_classes) >= 1) and (y_proba.shape[1] !=3))
+            print("Predictions Value Counts")
+            print(pd.Series(y_pred.ravel()).value_counts())
+            print("Accuracy Score", accuracy_score(y_test, y_pred))
+
+
+            data = {
+                "period": [str(chunk_starts[cid].date())] * len(y_pred),
+                "prediction": y_pred.ravel(),
+                "y_test": y_test.values,
+                "y_test_index": list(range(len(y_test))),
+                "date": X_test.index,
+            }
+            for idx, lbl in enumerate(classes):
+                data[f"pred_proba_{lbl}"] = y_proba[:, idx]
+
+            preds.append(pd.DataFrame(data))
+
+            log.info(
+                "Test chunk starting %s – train rows: %s, test rows: %s",
+                chunk_starts[cid].date(),
+                len(y_train),
+                len(y_test),
+            )
+
+        # ---------- aggregate ---------------------------------------------------
         metrics_df = pd.DataFrame(metrics)
-        aggregate = metrics_df[["accuracy","precision","recall","f1","roc_auc","brier"]].mean().to_dict()
+        aggregate = metrics_df.drop(columns=["period", "n_test"]).mean().to_dict()
         preds_df = pd.concat(preds).sort_index().reset_index(drop=False)
 
         return metrics_df, aggregate, preds_df
     
+    import psutil
+    import re
+    from tqdm import tqdm
+
+    from sklearn.metrics import (
+        accuracy_score, precision_score, recall_score, f1_score,
+        roc_auc_score, log_loss
+    )
+
+    from sklearn.preprocessing import label_binarize, LabelEncoder
+
+    proba_dfs = []
 
     # ——— 3) loop over models ——
     for name, mdl in models.items():
+        print(f"\n\nCurrent model being trained: {name}")
         model_start = time.time()
-        mdl.fit(X_train, y_train)
-        print(f"{name} fitted")
+        # mdl.fit(X_train, y_train)
+        # print(f"{name} fitted")
 
-        now = time.time()
-        # — choose best explainer —
-        if isinstance(mdl, (CatBoostClassifier, XGBClassifier)):
-            explainer = shap.TreeExplainer(mdl)
+        # now = time.time()
+        # # — choose best explainer —
+        # if isinstance(mdl, (CatBoostClassifier, XGBClassifier)):
+        #     explainer = shap.TreeExplainer(mdl)
 
-        elif isinstance(mdl, (LogisticRegression, SGDClassifier)):
-            # linear models use LinearExplainer (fast, exact for linear)
-            # X_train acts as the "background" dataset
-            explainer = shap.LinearExplainer(
-                mdl,
-                X_train)
+        # elif isinstance(mdl, (LogisticRegression, SGDClassifier)):
+        #     # linear models use LinearExplainer (fast, exact for linear)
+        #     # X_train acts as the "background" dataset
+        #     explainer = shap.LinearExplainer(
+        #         mdl,
+        #         X_train)
 
-        # — compute SHAP on X_test —
-        if isinstance(mdl,  (CatBoostClassifier, XGBClassifier, LogisticRegression, SGDClassifier)):
-            raw_shap = explainer.shap_values(X_test) #, nsamples=100)
-            # if list of arrays ([neg, pos]), take pos‐class
-            if isinstance(raw_shap, list):
-                raw_shap = raw_shap[1]
-            shap_values_dict[name] = raw_shap
-            print(f"{name} SHAP values done")
-            print(f"Time to compute SHAP values: {time.time() - now}")
+        # # — compute SHAP on X_test —
+        # if isinstance(mdl,  (CatBoostClassifier, XGBClassifier, LogisticRegression, SGDClassifier)):
+        #     raw_shap = explainer.shap_values(X_test) #, nsamples=100)
+        #     # if list of arrays ([neg, pos]), take pos‐class
+        #     if isinstance(raw_shap, list):
+        #         raw_shap = raw_shap[1]
+        #     shap_values_dict[name] = raw_shap
+        #     print(f"{name} SHAP values done")
+        #     print(f"Time to compute SHAP values: {time.time() - now}")
 
-        # — compute preds & probabilities —
-        y_pred  = mdl.predict(X_test)
-        y_proba = mdl.predict_proba(X_test)[:,1]
+        # # — compute preds & probabilities —
+        # y_pred  = mdl.predict(X_test)
+        # y_proba = mdl.predict_proba(X_test)[:,1]
 
-        single_model_metrics = {
-            'model'    : name,
-            'accuracy' : accuracy_score(y_test, y_pred),
-            'precision': precision_score(y_test, y_pred),
-            'recall'   : recall_score(y_test, y_pred),
-            'f1'       : f1_score(y_test, y_pred),
-            'roc_auc'  : roc_auc_score(y_test, y_proba),
-            'brier'    : brier_score_loss(y_test, y_proba),
-        }
+        # single_model_metrics = {
+        #     'model'    : name,
+        #     'accuracy' : accuracy_score(y_test, y_pred),
+        #     'precision': precision_score(y_test, y_pred),
+        #     'recall'   : recall_score(y_test, y_pred),
+        #     'f1'       : f1_score(y_test, y_pred),
+        #     'roc_auc'  : roc_auc_score(y_test, y_proba),
+        #     'brier'    : brier_score_loss(y_test, y_proba),
+        # }
 
-        print(single_model_metrics)
-        print(f"Time to compute 80/20 model {name}: {time.time() - model_start}")
+        # print(single_model_metrics)
+        # print(f"Time to compute 80/20 model {name}: {time.time() - model_start}")
 
-        metrics_df, agg_df, preds_df = rolling_backtest(
+        y_temp = df_long["returns"]
+        y_temp.index = df_long['date']
+
+        print(f"{psutil.virtual_memory().total/1024**3:.2f} GB")
+
+        metrics_df, agg_df, preds_df = rolling_backtest_period(
             X.set_index(df_long['date']),
-            y,
-            freq="W",                # e.g. "M", "W", "D", etc.
+            y_temp,
+            period_length=5,                # e.g. "M", "W", "D", etc.
             start_test_date="2022-01-03",
-            model_cls=mdl,
-        )
+            model_cls=mdl    )
 
         agg_df['model'] = name
 
@@ -3176,502 +3347,224 @@ def main(rolling_train_length=2100,
 
         # — compute metrics dict —
         metrics_list.append(agg_df)
-        preds_df = pd.DataFrame(df_long["date"].iloc[split:])
-        preds_df["prediction"] = y_pred
-        preds_df["pred_proba"] = y_proba
+        # preds_df = pd.DataFrame(df_long["date"].iloc[split:])
+        # preds_df["prediction"] = y_pred
+        # preds_df["pred_proba"] = y_proba
         preds_df["model"] = name
         preds_df["uuid"] = uuid
         preds_df["runtime"] = current_time
-        append_to_bigquery(preds_df, DESTINATION_DATASET, f'model-predictions')
+        proba_dfs.append(preds_df)
+        append_to_bigquery(preds_df, DESTINATION_DATASET, f'model-predictions-{table_suffix}')
         print(f"Time to compute whole model {name}: {time.time() - model_start}")
 
     # ——— 4) flatten SHAP into list of dicts ——
-    feat_names = feature_columns
-    shap_summary = []
+    # feat_names = feature_columns
+    # shap_summary = []
 
-    for name, raw_shap in shap_values_dict.items():
-        # raw_shap: (n_samples, n_feats)
-        n_feats = raw_shap.shape[1]
-        # make sure your feature list lines up with raw_shap
-        used_feats = feature_columns[:n_feats]  
+    # for name, raw_shap in shap_values_dict.items():
+    #     # raw_shap: (n_samples, n_feats)
+    #     n_feats = raw_shap.shape[1]
+    #     # make sure your feature list lines up with raw_shap
+    #     used_feats = feature_columns[:n_feats]
 
-        for j, feat in enumerate(used_feats):
-            vals = raw_shap[:, j]
-            shap_summary.append({
-                'model'       : name,
-                'feature'     : feat,
-                # average over days
-                'mean_shap'   : np.mean(vals),
-                # peak effect over days
-                'max_shap'    : np.max(np.abs(vals)),
-                # if you want absolute instead:
-                # 'mean_abs_shap': np.mean(np.abs(vals)),
-                # 'max_abs_shap' : np.max(np.abs(vals)),
-            })
+    #     for j, feat in enumerate(used_feats):
+    #         vals = raw_shap[:, j]
+    #         shap_summary.append({
+    #             'model'       : name,
+    #             'feature'     : feat,
+    #             # average over days
+    #             'mean_shap'   : np.mean(vals),
+    #             # peak effect over days
+    #             'max_shap'    : np.max(np.abs(vals)),
+    #             # if you want absolute instead:
+    #             # 'mean_abs_shap': np.mean(np.abs(vals)),
+    #             # 'max_abs_shap' : np.max(np.abs(vals)),
+    #         })
 
 
-    # ——— 5) save SHAP values and metrics to BigQuery ——
-    df_l0_metrics = pd.DataFrame(metrics_list)
-    df_l0_metrics['runtime'] = current_time
-    df_l0_metrics['uuid'] = uuid
-    df_l0_shap     = pd.DataFrame(shap_summary)
-    df_l0_shap['runtime'] = current_time
-    df_l0_shap['uuid'] = uuid
+    # # ——— 5) save SHAP values and metrics to BigQuery ——
+    # df_l0_metrics = pd.DataFrame(metrics_list)
+    # df_l0_metrics['runtime'] = current_time
+    # df_l0_metrics['uuid'] = uuid
+    # df_l0_shap     = pd.DataFrame(shap_summary)
+    # df_l0_shap['runtime'] = current_time
+    # df_l0_shap['uuid'] = uuid
 
-    append_to_bigquery(df_l0_metrics, DESTINATION_DATASET, f'sub-meta-model-metrics')
-    append_to_bigquery(df_l0_shap, DESTINATION_DATASET, f'sub-meta-model-shap')
+    all_predictions = pd.concat(proba_dfs)
+    # append_to_bigquery(all_predictions, DESTINATION_DATASET, f'model-predictions-{table_suffix}')
+    # append_to_bigquery(df_l0_shap, DESTINATION_DATASET, f'sub-meta-model-shap')
+    all_predictions = pd.concat(proba_dfs)
+    all_predictions = all_predictions[all_predictions["y_test_index"] == 0]
+
+    preds_df = (
+        all_predictions
+        .groupby(['date'])
+        [['pred_proba_0', 'pred_proba_1', 'pred_proba_2']]
+        .mean()
+        .reset_index()
+    ).sort_values("date")
+
+    preds_df['prediction'] = np.vstack([
+        preds_df['pred_proba_0'],
+        preds_df['pred_proba_1'],
+        preds_df['pred_proba_2']
+    ]).T.argmax(axis=1)
 
     # -------------------- 4. Simple equal‑weight ensemble ------------
-    import numpy as np
-    probas = np.column_stack([m.predict_proba(X_test)[:,1] for m in models.values()])
-    y_pred_proba = probas.mean(axis=1)                         # ensemble probability
-    y_pred       = (y_pred_proba >= 0.5).astype(int)           # hard class
-
-    preds_df = pd.DataFrame(df_long["date"].iloc[split:])
-    preds_df["prediction"] = y_pred
-    preds_df["pred_proba"] = y_pred_proba
     preds_df["model"] = "simple average"
     preds_df["uuid"] = uuid
     preds_df["runtime"] = current_time
-    append_to_bigquery(preds_df, DESTINATION_DATASET, f'model-predictions')
+    preds_df = pd.merge(preds_df, all_predictions[["date", "y_test"]], on="date", how="left").drop_duplicates()
+    append_to_bigquery(preds_df, DESTINATION_DATASET, f'model-predictions-{table_suffix}')
 
 
     ###################################################################################
-    # 4. Evaluate the model performance
+    # 4. Evaluate the model performance ‑‑‑‑‑ multiclass version
     ###################################################################################
-
-    accuracy  = accuracy_score (y_test, y_pred)
-    precision = precision_score(y_test, y_pred)
-    recall    = recall_score   (y_test, y_pred)
-    f1        = f1_score       (y_test, y_pred)
-    roc_auc   = roc_auc_score  (y_test, y_pred_proba)
-    brier     = brier_score_loss(y_test, y_pred_proba)
-
-    print(f"Accuracy : {accuracy :.4f}")
-    print(f"Precision: {precision:.4f}")
-    print(f"Recall   : {recall   :.4f}")
-    print(f"F1 score : {f1       :.4f}")
-    print(f"ROC AUC  : {roc_auc  :.4f}")
-    print(f"Brier    : {brier    :.4f}")
-
-    print("Confusion matrix:\n", confusion_matrix(y_test, y_pred))
-
-    ensemble = "simple average"
-    metrics_df = sanitize_and_convert_columns(pd.DataFrame([{"accuracy":accuracy, "precision":precision, "recall":recall, "f1":f1, "roc_auc":roc_auc, "brier": brier, "ensemble":ensemble, 'uuid':uuid, 'runtime':current_time}]))
-    print(metrics_df)
-    append_to_bigquery(metrics_df, DESTINATION_DATASET, f'meta_model_metrics_{table_suffix}')
-
-    # -------------------- 6.  Diagnostic plots -----------------------
-    import matplotlib.pyplot as plt
-
-    # a) Confusion‑matrix heat‑map
-    cm = confusion_matrix(y_test, y_pred)
-    confusion_matrix_plot = plt.figure(figsize=(6,4))
-    plt.imshow(cm, interpolation="nearest")
-    plt.title("Confusion Matrix")
-    plt.colorbar()
-    tick = np.arange(2)
-    plt.xticks(tick, ["Negative","Positive"])
-    plt.yticks(tick, ["Negative","Positive"])
-    for i in range(2):
-        for j in range(2):
-            plt.text(j, i, cm[i,j], ha="center", va="center",
-                    color="white" if cm[i,j] > cm.max()/2 else "black")
-    plt.xlabel("Predicted label")
-    plt.ylabel("True label")
-    plt.show()
-
-
-    # b) ROC curve
-    fpr, tpr, _ = roc_curve(y_test, y_pred_proba)
-    roc_plot = plt.figure(figsize=(6,4))
-    plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.4f}")
-    plt.plot([0,1],[0,1], linestyle="--", label="Chance")
-    plt.xlabel("False Positive Rate")
-    plt.ylabel("True Positive Rate")
-    plt.title("ROC Curve")
-    plt.legend(); plt.show()
-
-    # c) Precision‑Recall curve
-    prec, rec, _ = precision_recall_curve(y_test, y_pred_proba)
-    precision_recall_plot = plt.figure(figsize=(6,4))
-    plt.plot(rec, prec)
-    plt.xlabel("Recall"); plt.ylabel("Precision"); plt.title("Precision‑Recall Curve")
-    plt.show()
-
-    # d) Calibration curve
-    prob_true, prob_pred = calibration_curve(y_test, y_pred_proba, n_bins=50)
-    calibration_curve_plot = plt.figure(figsize=(6,4))
-    plt.plot(prob_pred, prob_true, marker="o")
-    plt.plot([0,1],[0,1], linestyle="--")
-    plt.xlabel("Mean Predicted Probability")
-    plt.ylabel("Fraction of Positives")
-    plt.title("Calibration Curve")
-    plt.show()
-
-    # e) Histogram of predicted probabilities
-    predicted_probability_plot = plt.figure(figsize=(6,4))
-    plt.hist(y_pred_proba, bins=20, edgecolor="k")
-    plt.xlabel("Predicted probability"); plt.ylabel("Frequency")
-    plt.title("Distribution of Predicted Probabilities")
-    plt.show()
-
-    # Persist plots to GCS
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    file_prefix = f"{date_str}/{uuid+'__'+ensemble}"
-    save_performance_figure_to_gcs(confusion_matrix_plot, STAGING_BUCKET, f"{file_prefix}_confusion_matrix.png")
-    save_performance_figure_to_gcs(roc_plot, STAGING_BUCKET, f"{file_prefix}_ROC.png")
-    save_performance_figure_to_gcs(precision_recall_plot, STAGING_BUCKET, f"{file_prefix}_precision_recall_plot.png")
-    save_performance_figure_to_gcs(calibration_curve_plot, STAGING_BUCKET, f"{file_prefix}_calibration_curve.png")
-    save_performance_figure_to_gcs(predicted_probability_plot, STAGING_BUCKET, f"{file_prefix}_predicted_probability.png")
-
-
-    #########################################################################################
-    # 5. Train a CatBoost meta model on the base models' predictions
-    #########################################################################################
-
-    import pandas as pd
     import numpy as np
-    from catboost import CatBoostClassifier
+    from sklearn.metrics import (accuracy_score, precision_score, recall_score,
+                                f1_score, roc_auc_score, log_loss,
+                                confusion_matrix, roc_curve,
+                                precision_recall_curve)
+    from sklearn.calibration import calibration_curve
+    from sklearn.preprocessing import label_binarize
 
-    # a) Collect probability columns for train and test
-    proba_train = {}
-    proba_test  = {}
-    for name, mdl in models.items():
-        proba_train[f"{name}_proba"] = mdl.predict_proba(X_train)[:, 1]
-        proba_test [f"{name}_proba"] = mdl.predict_proba(X_test)[:, 1]
+    # ---------------------------------------------------------------------
+    # 1.  Assemble y_test, y_pred and y_proba ------------------------------
+    # ---------------------------------------------------------------------
+    y_test   = preds_df["y_test"].to_numpy()          # shape (n, )
+    y_pred   = preds_df["prediction"].to_numpy()      # shape (n, )
 
-    # b) Convert the scaled numpy arrays back to DataFrames (so we can concat cleanly)
-    X_train_df = pd.DataFrame(X_train).reset_index(drop=True)
-    X_test_df  = pd.DataFrame(X_test).reset_index(drop=True)
+    # Probability columns must be in the same order as `classes`
+    prob_cols = [c for c in preds_df.columns if c.startswith("pred_proba_")]
+    y_proba   = preds_df[prob_cols].to_numpy()        # shape (n, n_classes)
 
-    # c) Append the new probability features column-wise
-    X_train_meta = pd.concat([X_train_df, pd.DataFrame(proba_train)], axis=1)
-    X_test_meta  = pd.concat([X_test_df,  pd.DataFrame(proba_test)],  axis=1)
+    classes   = np.arange(y_proba.shape[1])           # e.g. array([0,1,2])
+    y_test_ohe = label_binarize(y_test, classes=classes)  # shape (n, n_classes)
 
-    # d) Identify the probability columns
-    proba_cols = [col for col in X_train_meta.columns if str(col).endswith("_proba")]
+    # ---------------------------------------------------------------------
+    # 2.  Scalar metrics ---------------------------------------------------
+    # ---------------------------------------------------------------------
+    accuracy     = accuracy_score(y_test, y_pred)
 
-    # e) Function to add meta‐features based on probability columns
-    def add_meta_features(df, proba_cols, threshold=0.5, eps=1e-15):
-        P = df[proba_cols]
-        
-        # basic moments
-        df["meta_mean"]   = P.mean(axis=1)
-        df["meta_std"]    = P.std(axis=1)
-        df["meta_min"]    = P.min(axis=1)
-        df["meta_max"]    = P.max(axis=1)
-        df["meta_range"]  = df["meta_max"] - df["meta_min"]
-        df["meta_median"] = P.median(axis=1)
-        
-        # quantiles & IQR
-        df["meta_q25"] = P.quantile(0.25, axis=1)
-        df["meta_q75"] = P.quantile(0.75, axis=1)
-        df["meta_iqr"] = df["meta_q75"] - df["meta_q25"]
-        
-        # higher‐order moments
-        df["meta_skew"]     = P.skew(axis=1)
-        df["meta_kurtosis"] = P.kurtosis(axis=1)
-        
-        # entropy (sum of binary‐entropies)
-        ent = -(P * np.log(P + eps) + (1 - P) * np.log(1 - P + eps))
-        df["meta_entropy"] = ent.sum(axis=1)
-        
-        # threshold‐based measures
-        df["meta_count_above_thr"] = (P > threshold).sum(axis=1)
-        df["meta_frac_above_thr"]  = df["meta_count_above_thr"] / len(proba_cols)
-        
-        return df
+    precision    = precision_score(y_test, y_pred,
+                                labels=classes,
+                                average="macro",
+                                zero_division=0)
 
-    # f) Apply to your train & test metasets
-    X_train_meta = add_meta_features(X_train_meta, proba_cols)
-    X_test_meta  = add_meta_features(X_test_meta,  proba_cols)
+    recall       = recall_score(y_test, y_pred,
+                                labels=classes,
+                                average="macro",
+                                zero_division=0)
 
-    print("Meta feature matrix shape:", X_train_meta.shape, "train  |", X_test_meta.shape, "test")
+    f1           = f1_score(y_test, y_pred,
+                            labels=classes,
+                            average="macro",
+                            zero_division=0)
 
-    # -------------------- 5.  Train CatBoost on the expanded set -----
-    meta_cb = CatBoostClassifier(
-        loss_function='Logloss',
-        eval_metric='AUC',
-        random_seed=42,
-        task_type='CPU',            # or "CPU"
-        depth=6,
-        learning_rate=0.02,
-        iterations=3000,
-        l2_leaf_reg=7,
-        # subsample=0.8,
-        bagging_temperature=2,
-        random_strength=1.5,
-        border_count=64,
-        early_stopping_rounds=150,
-        verbose=100                 # periodic logging helps you see convergence
-    )
-    meta_cb.fit(X_train_meta, y_train)
+    try:
+        roc_auc_ovr_val = roc_auc_score(
+            y_test_ohe, y_proba, multi_class="ovr", average="macro"
+        )
+        roc_auc_ovo_val = roc_auc_score(
+            y_test_ohe, y_proba, multi_class="ovo", average="macro"
+        )
+    except ValueError:
+        roc_auc_ovr_val = np.nan
+        roc_auc_ovo_val = np.nan
 
-    # -------------------- 6.  Evaluate the stacked model -------------
-    y_pred_proba = meta_cb.predict_proba(X_test_meta)[:, 1]
-    y_pred       = (y_pred_proba >= 0.5).astype(int)
+    logloss      = 0
 
-    preds_df = pd.DataFrame(df_long["date"].iloc[split:])
-    preds_df["prediction"] = y_pred
-    preds_df["pred_proba"] = y_pred_proba
-    preds_df["model"] = "Meta Model with Data"
-    preds_df["uuid"] = uuid
-    preds_df["runtime"] = current_time
-    append_to_bigquery(preds_df, DESTINATION_DATASET, f'model-predictions')
-
-    accuracy  = accuracy_score (y_test, y_pred)
-    precision = precision_score(y_test, y_pred)
-    recall    = recall_score   (y_test, y_pred)
-    f1        = f1_score       (y_test, y_pred)
-    roc_auc   = roc_auc_score  (y_test, y_pred_proba)
-    brier     = brier_score_loss(y_test, y_pred_proba)
-
-    print(f"Accuracy : {accuracy :.4f}")
-    print(f"Precision: {precision:.4f}")
-    print(f"Recall   : {recall   :.4f}")
-    print(f"F1 score : {f1       :.4f}")
-    print(f"ROC AUC  : {roc_auc  :.4f}")
-    print(f"Brier    : {brier    :.4f}")
+    print(f"Accuracy     : {accuracy     :.4f}")
+    print(f"Precision    : {precision    :.4f}")
+    print(f"Recall       : {recall       :.4f}")
+    print(f"F1           : {f1           :.4f}")
+    print(f"ROC AUC (ovr): {roc_auc_ovr_val  :.4f}")
+    print(f"ROC AUC (ovo): {roc_auc_ovo_val  :.4f}")
+    print(f"Log‑loss     : {logloss     :.4f}")
 
     print("Confusion matrix:\n", confusion_matrix(y_test, y_pred))
 
-    ensemble = "Meta CatBoost with base models and original data"
-    metrics_df = sanitize_and_convert_columns(pd.DataFrame([{"accuracy":accuracy, "precision":precision, "recall":recall, "f1":f1, "roc_auc":roc_auc, "brier": brier, "ensemble":ensemble, 'uuid':uuid, 'runtime':current_time}]))
-    print(metrics_df)
-    append_to_bigquery(metrics_df, DESTINATION_DATASET, f'meta_model_metrics_{table_suffix}')
+    # Store to BigQuery as before
+    ensemble   = "simple average"
+    metrics_df = sanitize_and_convert_columns(
+                    pd.DataFrame([{
+                    "accuracy": accuracy,
+                    "precision": precision,
+                    "recall": recall,
+                    "f1": f1,
+                    "roc_auc_ovr": roc_auc_ovr_val,
+                    "roc_auc_ovo": roc_auc_ovo_val,
+                    "log_loss": logloss,
+                    "ensemble": ensemble,
+                    "uuid": uuid,
+                    "runtime": current_time
+                    }])
+                )
+    append_to_bigquery(metrics_df, DESTINATION_DATASET,
+                    f"meta_model_metrics_{table_suffix}")
 
-    # -------------------- 6.  Diagnostic plots -----------------------
+    ###################################################################################
+    # 6. Diagnostic plots ‑‑‑‑‑ multiclass version
+    ###################################################################################
     import matplotlib.pyplot as plt
+    import itertools
 
-    # a) Confusion‑matrix heat‑map
-    cm = confusion_matrix(y_test, y_pred)
+    # a) Confusion‑matrix heat‑map ---------------------------------------
+    cm  = confusion_matrix(y_test, y_pred, labels=classes)
     confusion_matrix_plot = plt.figure(figsize=(6,4))
     plt.imshow(cm, interpolation="nearest")
     plt.title("Confusion Matrix")
     plt.colorbar()
-    tick = np.arange(2)
-    plt.xticks(tick, ["Negative","Positive"])
-    plt.yticks(tick, ["Negative","Positive"])
-    for i in range(2):
-        for j in range(2):
-            plt.text(j, i, cm[i,j], ha="center", va="center",
-                    color="white" if cm[i,j] > cm.max()/2 else "black")
+    plt.xticks(classes, classes)
+    plt.yticks(classes, classes)
+    for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
+        plt.text(j, i, cm[i, j], ha="center", va="center",
+                color="white" if cm[i, j] > cm.max()/2 else "black")
     plt.xlabel("Predicted label")
     plt.ylabel("True label")
+    plt.tight_layout()
     plt.show()
 
-    # b) ROC curve
-    fpr, tpr, _ = roc_curve(y_test, y_pred_proba)
+    # b) ROC curves (one‑vs‑rest) ----------------------------------------
     roc_plot = plt.figure(figsize=(6,4))
-    plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.4f}")
-    plt.plot([0,1],[0,1], linestyle="--", label="Chance")
-    plt.xlabel("False Positive Rate")
-    plt.ylabel("True Positive Rate")
-    plt.title("ROC Curve")
-    plt.legend(); plt.show()
+    for idx, cls in enumerate(classes):
+        fpr, tpr, _ = roc_curve(y_test_ohe[:, idx], y_proba[:, idx])
+        auc_val     = roc_auc_score(y_test_ohe[:, idx], y_proba[:, idx])
+        plt.plot(fpr, tpr, label=f"class {cls} (AUC={auc_val:.3f})")
+    plt.plot([0,1], [0,1], linestyle="--", label="Chance")
+    plt.xlabel("False Positive Rate"); plt.ylabel("True Positive Rate")
+    plt.title("ROC Curve (one‑vs‑rest)")
+    plt.legend(); plt.tight_layout(); plt.show()
 
-    # c) Precision‑Recall curve
-    prec, rec, _ = precision_recall_curve(y_test, y_pred_proba)
+    # c) Precision‑Recall curves -----------------------------------------
     precision_recall_plot = plt.figure(figsize=(6,4))
-    plt.plot(rec, prec)
-    plt.xlabel("Recall"); plt.ylabel("Precision"); plt.title("Precision‑Recall Curve")
-    plt.show()
+    for idx, cls in enumerate(classes):
+        prec, rec, _ = precision_recall_curve(y_test_ohe[:, idx], y_proba[:, idx])
+        plt.plot(rec, prec, label=f"class {cls}")
+    plt.xlabel("Recall"); plt.ylabel("Precision")
+    plt.title("Precision‑Recall Curve"); plt.legend(); plt.tight_layout(); plt.show()
 
-    # d) Calibration curve
-    prob_true, prob_pred = calibration_curve(y_test, y_pred_proba, n_bins=50)
+    # d) Calibration curves ----------------------------------------------
     calibration_curve_plot = plt.figure(figsize=(6,4))
-    plt.plot(prob_pred, prob_true, marker="o")
-    plt.plot([0,1],[0,1], linestyle="--")
-    plt.xlabel("Mean Predicted Probability")
-    plt.ylabel("Fraction of Positives")
-    plt.title("Calibration Curve")
-    plt.show()
+    for idx, cls in enumerate(classes):
+        prob_true, prob_pred = calibration_curve(y_test_ohe[:, idx],
+                                                y_proba[:, idx], n_bins=20)
+        plt.plot(prob_pred, prob_true, marker="o", linestyle="-", label=f"class {cls}")
+    plt.plot([0,1],[0,1], linestyle="--", color="gray")
+    plt.xlabel("Mean Predicted Probability"); plt.ylabel("Fraction of Positives")
+    plt.title("Calibration Curves"); plt.legend(); plt.tight_layout(); plt.show()
 
-    # e) Histogram of predicted probabilities
+    # e) Histogram of predicted probabilities ----------------------------
     predicted_probability_plot = plt.figure(figsize=(6,4))
-    plt.hist(y_pred_proba, bins=20, edgecolor="k")
+    plt.hist(y_proba, bins=20, edgecolor="k", label=[f"class {c}" for c in classes])
     plt.xlabel("Predicted probability"); plt.ylabel("Frequency")
-    plt.title("Distribution of Predicted Probabilities")
-    plt.show()
+    plt.title("Distribution of Predicted Probabilities"); plt.legend()
+    plt.tight_layout(); plt.show()
 
-    # Persist plots to GCS
     date_str = datetime.now().strftime("%Y-%m-%d")
     file_prefix = f"{date_str}/{uuid+'__'+ensemble}"
-    save_performance_figure_to_gcs(confusion_matrix_plot, STAGING_BUCKET, f"{file_prefix}_confusion_matrix.png")
-    save_performance_figure_to_gcs(roc_plot, STAGING_BUCKET, f"{file_prefix}_ROC.png")
-    save_performance_figure_to_gcs(precision_recall_plot, STAGING_BUCKET, f"{file_prefix}_precision_recall_plot.png")
-    save_performance_figure_to_gcs(calibration_curve_plot, STAGING_BUCKET, f"{file_prefix}_calibration_curve.png")
-    save_performance_figure_to_gcs(predicted_probability_plot, STAGING_BUCKET, f"{file_prefix}_predicted_probability.png")
 
-    ##############################################################################################
-    # 6. Meta Model without base data (just the base model predictions)
-    ##############################################################################################
-
-    # -------------------- 4.  Build meta‐feature sets (probabilities only) ---------
-    # a) Collect probability columns for train and test
-    proba_train = {
-        f"{name}_proba": mdl.predict_proba(X_train)[:, 1]
-        for name, mdl in models.items()
-    }
-    proba_test = {
-        f"{name}_proba": mdl.predict_proba(X_test)[:, 1]
-        for name, mdl in models.items()
-    }
-
-    # b) Turn them into DataFrames
-    X_train_meta = pd.DataFrame(proba_train).reset_index(drop=True)
-    X_test_meta  = pd.DataFrame(proba_test).reset_index(drop=True)
-
-    # c) Helper to add meta‐features
-    def add_meta_features(df, threshold=0.5, eps=1e-15):
-        # basic moments
-        df["meta_mean"]   = df.mean(axis=1)
-        df["meta_std"]    = df.std(axis=1)
-        df["meta_min"]    = df.min(axis=1)
-        df["meta_max"]    = df.max(axis=1)
-        df["meta_range"]  = df["meta_max"] - df["meta_min"]
-        df["meta_median"] = df.median(axis=1)
-
-        # quantiles & IQR
-        df["meta_q25"] = df.quantile(0.25, axis=1)
-        df["meta_q75"] = df.quantile(0.75, axis=1)
-        df["meta_iqr"] = df["meta_q75"] - df["meta_q25"]
-
-        # shape of the distribution
-        df["meta_skew"]     = df.skew(axis=1)
-        df["meta_kurtosis"] = df.kurtosis(axis=1)
-
-        # model‐disagreement / uncertainty
-        # binary entropy per model, summed
-        ent = -(df * np.log(df + eps) + (1 - df) * np.log(1 - df + eps))
-        df["meta_entropy"] = ent.sum(axis=1)
-
-        # threshold‐based counts
-        df["meta_count_above_thr"] = (df > threshold).sum(axis=1)
-        df["meta_frac_above_thr"]  = df["meta_count_above_thr"] / df.shape[1]
-
-        return df
-
-    # Apply to train & test
-    X_train_meta = add_meta_features(X_train_meta)
-    X_test_meta  = add_meta_features(X_test_meta)
-
-
-    print("Meta feature matrix shape:",
-        X_train_meta.shape, "train  |", X_test_meta.shape, "test")
-
-    # -------------------- 5.  Train CatBoost on the meta‐features -------------
-    from catboost import CatBoostClassifier
-
-    meta_cb = CatBoostClassifier(
-        loss_function='Logloss',
-        eval_metric='AUC',
-        random_seed=42,
-        task_type='CPU',            # or "CPU"
-        depth=6,
-        learning_rate=0.02,
-        iterations=3000,
-        l2_leaf_reg=7,
-        bagging_temperature=2,
-        random_strength=1.5,
-        border_count=64,
-        early_stopping_rounds=150,
-        verbose=100
-    )
-
-    meta_cb.fit(X_train_meta, y_train)
-
-    # -------------------- 6.  Evaluate the stacked model -------------
-    y_pred_proba = meta_cb.predict_proba(X_test_meta)[:, 1]
-    y_pred       = (y_pred_proba >= 0.5).astype(int)
-
-    preds_df = pd.DataFrame(df_long["date"].iloc[split:])
-    preds_df["prediction"] = y_pred
-    preds_df["pred_proba"] = y_pred_proba
-    preds_df["model"] = "Meta Model"
-    preds_df["uuid"] = uuid
-    preds_df["runtime"] = current_time
-    append_to_bigquery(preds_df, DESTINATION_DATASET, f'model-predictions')
-
-    accuracy  = accuracy_score (y_test, y_pred)
-    precision = precision_score(y_test, y_pred)
-    recall    = recall_score   (y_test, y_pred)
-    f1        = f1_score       (y_test, y_pred)
-    roc_auc   = roc_auc_score  (y_test, y_pred_proba)
-    brier     = brier_score_loss(y_test, y_pred_proba)
-
-    print(f"Accuracy : {accuracy :.4f}")
-    print(f"Precision: {precision:.4f}")
-    print(f"Recall   : {recall   :.4f}")
-    print(f"F1 score : {f1       :.4f}")
-    print(f"ROC AUC  : {roc_auc  :.4f}")
-    print(f"Brier    : {brier    :.4f}")
-
-    print("Confusion matrix:\n", confusion_matrix(y_test, y_pred))
-
-    ensemble = "Meta CatBoost without base data"
-    print(metrics_df)
-    metrics_df = sanitize_and_convert_columns(pd.DataFrame([{"accuracy":accuracy, "precision":precision, "recall":recall, "f1":f1, "roc_auc":roc_auc, "brier": brier, "ensemble":ensemble, 'uuid':uuid, 'runtime':current_time}]))
-    append_to_bigquery(metrics_df, DESTINATION_DATASET, f'meta_model_metrics_{table_suffix}')
-
-    # -------------------- 6.  Diagnostic plots -----------------------
-    import matplotlib.pyplot as plt
-
-    # a) Confusion‑matrix heat‑map
-    cm = confusion_matrix(y_test, y_pred)
-    confusion_matrix_plot = plt.figure(figsize=(6,4))
-    plt.imshow(cm, interpolation="nearest")
-    plt.title("Confusion Matrix")
-    plt.colorbar()
-    tick = np.arange(2)
-    plt.xticks(tick, ["Negative","Positive"])
-    plt.yticks(tick, ["Negative","Positive"])
-    for i in range(2):
-        for j in range(2):
-            plt.text(j, i, cm[i,j], ha="center", va="center",
-                    color="white" if cm[i,j] > cm.max()/2 else "black")
-    plt.xlabel("Predicted label")
-    plt.ylabel("True label")
-    plt.show()
-
-    # b) ROC curve
-    fpr, tpr, _ = roc_curve(y_test, y_pred_proba)
-    roc_plot = plt.figure(figsize=(6,4))
-    plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.4f}")
-    plt.plot([0,1],[0,1], linestyle="--", label="Chance")
-    plt.xlabel("False Positive Rate")
-    plt.ylabel("True Positive Rate")
-    plt.title("ROC Curve")
-    plt.legend(); plt.show()
-
-    # c) Precision‑Recall curve
-    prec, rec, _ = precision_recall_curve(y_test, y_pred_proba)
-    precision_recall_plot = plt.figure(figsize=(6,4))
-    plt.plot(rec, prec)
-    plt.xlabel("Recall"); plt.ylabel("Precision"); plt.title("Precision‑Recall Curve")
-    plt.show()
-
-    # d) Calibration curve
-    prob_true, prob_pred = calibration_curve(y_test, y_pred_proba, n_bins=50)
-    calibration_curve_plot = plt.figure(figsize=(6,4))
-    plt.plot(prob_pred, prob_true, marker="o")
-    plt.plot([0,1],[0,1], linestyle="--")
-    plt.xlabel("Mean Predicted Probability")
-    plt.ylabel("Fraction of Positives")
-    plt.title("Calibration Curve")
-    plt.show()
-
-    # e) Histogram of predicted probabilities
-    predicted_probability_plot = plt.figure(figsize=(6,4))
-    plt.hist(y_pred_proba, bins=20, edgecolor="k")
-    plt.xlabel("Predicted probability"); plt.ylabel("Frequency")
-    plt.title("Distribution of Predicted Probabilities")
-    plt.show()
-
-    # Persist plots to GCS
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    file_prefix = f"{date_str}/{uuid+'__'+ensemble}"
     save_performance_figure_to_gcs(confusion_matrix_plot, STAGING_BUCKET, f"{file_prefix}_confusion_matrix.png")
     save_performance_figure_to_gcs(roc_plot, STAGING_BUCKET, f"{file_prefix}_ROC.png")
     save_performance_figure_to_gcs(precision_recall_plot, STAGING_BUCKET, f"{file_prefix}_precision_recall_plot.png")

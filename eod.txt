@@ -27,3 +27,19 @@ https://console.cloud.google.com/vertex-ai/colab/notebooks?inv=1&invt=AbwqdQ&pro
 
 252 * 4
 
+Remove 10 limit on weeks
+Add model predictions 
+
+Reviewed approaches for change
+
+Add these
+import psutil
+import re
+from tqdm import tqdm
+
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    roc_auc_score, log_loss
+)
+from sklearn.preprocessing import label_binarize
+

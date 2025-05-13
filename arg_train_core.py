@@ -4,7 +4,7 @@ def main():
     import argparse
     import subprocess
     # from model import main as train_main_function
-    from model_core import main as train_main_function
+    from model_core_rolling import main as train_main_function
 
     # Google Cloud imports
     from google.cloud import bigquery, storage
@@ -205,19 +205,24 @@ def main():
                     help='How long to lag the returns') 
         
         parser.add_argument('--core-model-column',
-            type=str,
-            default="long_return",
-            help='Which returns to select from core model') 
+                type=str,
+                default="long_return",
+                help='Which returns to select from core model') 
 
         parser.add_argument('--l0-config',
-            type=str,
-            default="base",
-            help='Which returns to select from core model') 
+                type=str,
+                default="base",
+                help='Which returns to select from core model') 
         
         parser.add_argument('--use-rank-features',
-            type=int,
-            default=0,
-            help='Whether to use rank features or not') 
+                type=int,
+                default=0,
+                help='Whether to use rank features or not') 
+        
+        parser.add_argument('--rolling-window',
+                type=int,
+                default=20,
+                help='Whether to use rank features or not') 
 
         args = parser.parse_args()
         return args
@@ -265,6 +270,7 @@ def main():
     core_model_column = args.core_model_column
     l0_config = args.l0_config
     use_rank_features = args.use_rank_features
+    rolling_window = args.rolling_window
 
     train_main_function(
         rolling_train_length=rolling_train_length,
@@ -303,7 +309,8 @@ def main():
         return_lag=return_lag,
         core_model_column=core_model_column,
         l0_config=l0_config,
-        use_rank_features=use_rank_features
+        use_rank_features=use_rank_features,
+        rolling_window=rolling_window,
         )
 
 if __name__ == "__main__":
