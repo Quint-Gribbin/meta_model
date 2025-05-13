@@ -122,3 +122,6 @@ xgboost
 pytorch-tabnet
 imblearn
 statsmodels
+tqdm
+pytorch-tabnet
+imblearn
