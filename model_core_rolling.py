@@ -159,7 +159,7 @@ def main(rolling_train_length=2100,
     # 2. Update with the core model predictions
     ##########################################################################
 
-    test = pd.read_csv("risk_data (16).csv")
+    test = pd.read_csv("risk_v2.csv")
     test['date'] = pd.to_datetime(test['date'])
     test = test.sort_values('date', ascending=True)
     # test = test[test['date'] > "2007-01-01"]
