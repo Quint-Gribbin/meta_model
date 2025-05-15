@@ -38,16 +38,18 @@ def main(rolling_train_length=2100,
         use_rank_features=1,
         rolling_window=20,
 ):
+    
+    # Show all the input arguments to the model
     args = locals().copy()
-    args.pop("cluster_df")
-    print("Here are all the input arguments to the model:")
-    print(args)
 
-    # add popping logic here
+    # Popping out environment variables and other non-args
+    args.pop("cluster_df")
     keys_to_pop = [x for x in list(args.keys()) if x[0] == "_"] + ['In', 'Out', 'get_ipython', 'exit', 'quit']
     for key in keys_to_pop:
         if key in args:
             args.pop(key)
+    print("Here are all the input arguments to the model:")
+    print(args)
 
     YIELDS_TABLE = "issachar-feature-library.core_raw.factor_yields"
     INDEX_RETURNS_TABLE = "josh-risk.IssacharReporting.Index_Returns"
@@ -73,17 +75,16 @@ def main(rolling_train_length=2100,
     import pytz
     from datetime import datetime, timedelta
 
+    # Set other enviornment variables
     holdout_start = pd.to_datetime(holdout_start)
     current_time = pd.Timestamp.now()
     uuid = str(current_time) + "__model=Meta_Model__" + "__".join(f"{key}={value}" for key, value in args.items())
 
     # Google Cloud imports
     from google.cloud import bigquery, storage
-    # from google.api_core.exceptions import NotFound
 
     # Basic logging because the HP Tune does not log print statements until the end?
     import logging
-
     import subprocess
 
     # Run the command and capture output
@@ -101,7 +102,6 @@ def main(rolling_train_length=2100,
     def set_random_seeds(seed=42):
         random.seed(seed)
         np.random.seed(seed)
-
     set_random_seeds(random_seed)
 
     # Initialize the GCS clients
@@ -121,38 +121,39 @@ def main(rolling_train_length=2100,
         df = query_job.to_dataframe()   # Convert the results to a Pandas DataFrame
         return df
 
-    # Logic to determine which portfolios to use
-    if type(cluster_df) == type(0):
-        if will_portfolios == 1:
-            table_id = "issachar-feature-library.qjg.2025-02-13 Will Top 50 Returns"
-            df_port = read_table_to_dataframe(client, table_id).fillna(0)
-        else:
-                # Define the table ID for the saved table
-            table_id = "issachar-feature-library.qjg." + new_portfolios
-            df_port = read_table_to_dataframe(client, table_id).fillna(0)
+    ## [DEPRECATED] for meta-model
+    # # Logic to determine which portfolios to use 
+    # if type(cluster_df) == type(0):
+    #     if will_portfolios == 1:
+    #         table_id = "issachar-feature-library.qjg.2025-02-13 Will Top 50 Returns"
+    #         df_port = read_table_to_dataframe(client, table_id).fillna(0)
+    #     else:
+    #             # Define the table ID for the saved table
+    #         table_id = "issachar-feature-library.qjg." + new_portfolios
+    #         df_port = read_table_to_dataframe(client, table_id).fillna(0)
 
-        if 'repo' in new_portfolios:
-            df_port = df_port.set_index('date')
-            df_port = df_port / 100 # Standardize the returns
-            df_port = df_port[[x for x in df_port.columns if "inverse" not in x]] # Drop inverse portfolios (x*-1)
-        else:
-            df_port = df_port.pivot_table(index='date', columns='cluster', values='total_return')
-            # df_port = df_port.set_index('date')
-            df_port = df_port / 100 # Standardize the returns
-            df_port = df_port[[x for x in df_port.columns if "inverse" not in x]] # Drop inverse portfolios (x*-1)
-            subset = ['growth', 'profitability', 'volume_price_action', 'st_vol', 'accumulation_distribution', 'skew', 'rsi_2', 'short_momentum', 'technical_momentum', 'technical_hma', 'technical_candle', 'forward_estimates', 'alpha_005', 'alpha_020', 'alpha_034', 'alpha_041', 'cagr_stack', 'cagr_stack_s3', 'fql_1', 'fql_2', 'fql_3', 'fql_4', 'fql_5', 'fql_6', 'fql_7', 'fql_8', 'fql_9']
-            df_port = df_port[subset]
-            df_port.index = df_port.index.tz_localize(None)
-    else:
-        cluster_df = cluster_df.fillna(0)
-        cluster_dates = cluster_df['upload_date'].copy(deep=True)
-        df_port = cluster_df.pivot_table(index='date', columns='cluster', values='total_return')
-        # df_port = df_port.set_index('date')
-        df_port = df_port / 100 # Standardize the returns
-        df_port = df_port[[x for x in df_port.columns if "inverse" not in x]] # Drop inverse portfolios (x*-1)
-        subset = ['growth', 'profitability', 'volume_price_action', 'st_vol', 'accumulation_distribution', 'skew', 'rsi_2', 'short_momentum', 'technical_momentum', 'technical_hma', 'technical_candle', 'forward_estimates', 'alpha_005', 'alpha_020', 'alpha_034', 'alpha_041', 'cagr_stack', 'cagr_stack_s3', 'fql_1', 'fql_2', 'fql_3', 'fql_4', 'fql_5', 'fql_6', 'fql_7', 'fql_8', 'fql_9']
-        df_port = df_port[subset]
-        df_port.index = df_port.index.tz_localize(None)
+    #     if 'repo' in new_portfolios:
+    #         df_port = df_port.set_index('date')
+    #         df_port = df_port / 100 # Standardize the returns
+    #         df_port = df_port[[x for x in df_port.columns if "inverse" not in x]] # Drop inverse portfolios (x*-1)
+    #     else:
+    #         df_port = df_port.pivot_table(index='date', columns='cluster', values='total_return')
+    #         # df_port = df_port.set_index('date')
+    #         df_port = df_port / 100 # Standardize the returns
+    #         df_port = df_port[[x for x in df_port.columns if "inverse" not in x]] # Drop inverse portfolios (x*-1)
+    #         subset = ['growth', 'profitability', 'volume_price_action', 'st_vol', 'accumulation_distribution', 'skew', 'rsi_2', 'short_momentum', 'technical_momentum', 'technical_hma', 'technical_candle', 'forward_estimates', 'alpha_005', 'alpha_020', 'alpha_034', 'alpha_041', 'cagr_stack', 'cagr_stack_s3', 'fql_1', 'fql_2', 'fql_3', 'fql_4', 'fql_5', 'fql_6', 'fql_7', 'fql_8', 'fql_9']
+    #         df_port = df_port[subset]
+    #         df_port.index = df_port.index.tz_localize(None)
+    # else:
+    #     cluster_df = cluster_df.fillna(0)
+    #     cluster_dates = cluster_df['upload_date'].copy(deep=True)
+    #     df_port = cluster_df.pivot_table(index='date', columns='cluster', values='total_return')
+    #     # df_port = df_port.set_index('date')
+    #     df_port = df_port / 100 # Standardize the returns
+    #     df_port = df_port[[x for x in df_port.columns if "inverse" not in x]] # Drop inverse portfolios (x*-1)
+    #     subset = ['growth', 'profitability', 'volume_price_action', 'st_vol', 'accumulation_distribution', 'skew', 'rsi_2', 'short_momentum', 'technical_momentum', 'technical_hma', 'technical_candle', 'forward_estimates', 'alpha_005', 'alpha_020', 'alpha_034', 'alpha_041', 'cagr_stack', 'cagr_stack_s3', 'fql_1', 'fql_2', 'fql_3', 'fql_4', 'fql_5', 'fql_6', 'fql_7', 'fql_8', 'fql_9']
+    #     df_port = df_port[subset]
+    #     df_port.index = df_port.index.tz_localize(None)
 
 
     ##########################################################################
