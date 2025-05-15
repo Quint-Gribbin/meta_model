@@ -120,42 +120,7 @@ def main(rolling_train_length=2100,
         query_job = client.query(query)  # Make an API request to execute the query
         df = query_job.to_dataframe()   # Convert the results to a Pandas DataFrame
         return df
-
-    ## [DEPRECATED] for meta-model
-    # # Logic to determine which portfolios to use 
-    # if type(cluster_df) == type(0):
-    #     if will_portfolios == 1:
-    #         table_id = "issachar-feature-library.qjg.2025-02-13 Will Top 50 Returns"
-    #         df_port = read_table_to_dataframe(client, table_id).fillna(0)
-    #     else:
-    #             # Define the table ID for the saved table
-    #         table_id = "issachar-feature-library.qjg." + new_portfolios
-    #         df_port = read_table_to_dataframe(client, table_id).fillna(0)
-
-    #     if 'repo' in new_portfolios:
-    #         df_port = df_port.set_index('date')
-    #         df_port = df_port / 100 # Standardize the returns
-    #         df_port = df_port[[x for x in df_port.columns if "inverse" not in x]] # Drop inverse portfolios (x*-1)
-    #     else:
-    #         df_port = df_port.pivot_table(index='date', columns='cluster', values='total_return')
-    #         # df_port = df_port.set_index('date')
-    #         df_port = df_port / 100 # Standardize the returns
-    #         df_port = df_port[[x for x in df_port.columns if "inverse" not in x]] # Drop inverse portfolios (x*-1)
-    #         subset = ['growth', 'profitability', 'volume_price_action', 'st_vol', 'accumulation_distribution', 'skew', 'rsi_2', 'short_momentum', 'technical_momentum', 'technical_hma', 'technical_candle', 'forward_estimates', 'alpha_005', 'alpha_020', 'alpha_034', 'alpha_041', 'cagr_stack', 'cagr_stack_s3', 'fql_1', 'fql_2', 'fql_3', 'fql_4', 'fql_5', 'fql_6', 'fql_7', 'fql_8', 'fql_9']
-    #         df_port = df_port[subset]
-    #         df_port.index = df_port.index.tz_localize(None)
-    # else:
-    #     cluster_df = cluster_df.fillna(0)
-    #     cluster_dates = cluster_df['upload_date'].copy(deep=True)
-    #     df_port = cluster_df.pivot_table(index='date', columns='cluster', values='total_return')
-    #     # df_port = df_port.set_index('date')
-    #     df_port = df_port / 100 # Standardize the returns
-    #     df_port = df_port[[x for x in df_port.columns if "inverse" not in x]] # Drop inverse portfolios (x*-1)
-    #     subset = ['growth', 'profitability', 'volume_price_action', 'st_vol', 'accumulation_distribution', 'skew', 'rsi_2', 'short_momentum', 'technical_momentum', 'technical_hma', 'technical_candle', 'forward_estimates', 'alpha_005', 'alpha_020', 'alpha_034', 'alpha_041', 'cagr_stack', 'cagr_stack_s3', 'fql_1', 'fql_2', 'fql_3', 'fql_4', 'fql_5', 'fql_6', 'fql_7', 'fql_8', 'fql_9']
-    #     df_port = df_port[subset]
-    #     df_port.index = df_port.index.tz_localize(None)
-
-
+    
     ##########################################################################
     # 2. Update with the core model predictions
     ##########################################################################
@@ -3005,31 +2970,6 @@ def main(rolling_train_length=2100,
     metrics_list = []
     shap_values_dict = {}   # temporary storage of raw arrays
 
-    # --------------------------------------------------------------------------- #
-    # Helper: convert "W", "2W", "M", "Q", … → business‑day window length
-    # --------------------------------------------------------------------------- #
-    def _freq_to_window(freq: str) -> int:
-        m = re.fullmatch(r"(\d+)?([A-Za-z]+)", freq)
-        if m is None:                             # pragma: no cover
-            raise ValueError(f"Unrecognised freq string: {freq}")
-
-        mult_str, code = m.groups()
-        mult = int(mult_str) if mult_str else 1
-        code = code.upper()
-
-        base = {
-            "D": 1,   # calendar day     – assumes returns are only present on B‑days
-            "B": 1,   # business day
-            "W": 5,   # one calendar week ≈ five trading days
-            "M": 20,  # one calendar month ≈ twenty trading days
-            "Q": 60,  # quarter  ≈ three months
-            "A": 252  # year     ≈ 252 trading days
-        }
-        if code not in base:                      # pragma: no cover
-            raise ValueError(f"Unsupported base freq: {code}")
-
-        return mult * base[code]
-
     import logging
     from typing import Tuple, List, Union, Optional, Dict, Any
     import copy
@@ -3049,51 +2989,7 @@ def main(rolling_train_length=2100,
         neg_thresh: float = -0.002,  # −0.2 %
         pos_thresh: float = 0.002,  # +0.2 %
     ):
-        """Rolling classification back‑test using *fixed‑size hopping windows*.
 
-        Each *chunk* consists of exactly ``period_length`` **consecutive rows** of *trading‑day* data
-        (weekends/holidays are simply absent).  The timeline is cut into these non‑overlapping
-        windows starting from the very first observation; the final, incomplete window (if any) is
-        ignored so that *all* train / test chunks contain ``period_length`` observations.
-
-        The target is the mean return over the *next* ``period_length`` rows, mapped into three
-        classes:
-
-        ======  ================================
-        class   condition on mean period return
-        ======  ================================
-        0     mean <= ``neg_thresh``
-        1     ``neg_thresh`` < mean < ``pos_thresh``
-        2     mean >= ``pos_thresh``
-        ======  ================================
-
-        Parameters
-        ----------
-        X, y_cont
-            Feature matrix and 1‑day ahead *continuous* returns; indices must align and be a
-            ``DatetimeIndex``.
-        initial_train_fraction
-            Fraction of full chunks reserved for the initial training sample.
-        period_length
-            Fixed size (in *rows*) of each hopping window.
-        start_test_date
-            Earliest *chunk* start date allowed in the test sequence.
-        model_cls / model_kwargs
-            Either an estimator class plus kwargs or an already‑instantiated estimator.
-        log_level
-            Logging verbosity.
-        neg_thresh, pos_thresh
-            Class boundary thresholds (see table above).
-
-        Returns
-        -------
-        metrics_df : pd.DataFrame
-            Per‑chunk evaluation metrics.
-        aggregate : dict[str, float]
-            Mean of all numeric metrics across chunks.
-        preds_df : pd.DataFrame
-            Row‑level predictions with class probabilities.
-        """
 
         if period_length < 1:
             raise ValueError("period_length must be >= 1 row")
@@ -3177,12 +3073,6 @@ def main(rolling_train_length=2100,
             y_train = y.loc[train_mask].tail(lookback_rows)
             X_test = X.loc[test_mask]
             y_test = y.loc[test_mask]
-
-            # print("\nValue Counts for Train\n")
-            # print(y_train.value_counts())
-
-            # print("\nValue Counts for Test\n")
-            # print(y_test.value_counts())
 
             if X_test.empty:
                 continue  # safety – should not happen with strict chunk sizing
@@ -3288,47 +3178,6 @@ def main(rolling_train_length=2100,
     for name, mdl in models.items():
         print(f"\n\nCurrent model being trained: {name}")
         model_start = time.time()
-        # mdl.fit(X_train, y_train)
-        # print(f"{name} fitted")
-
-        # now = time.time()
-        # # — choose best explainer —
-        # if isinstance(mdl, (CatBoostClassifier, XGBClassifier)):
-        #     explainer = shap.TreeExplainer(mdl)
-
-        # elif isinstance(mdl, (LogisticRegression, SGDClassifier)):
-        #     # linear models use LinearExplainer (fast, exact for linear)
-        #     # X_train acts as the "background" dataset
-        #     explainer = shap.LinearExplainer(
-        #         mdl,
-        #         X_train)
-
-        # # — compute SHAP on X_test —
-        # if isinstance(mdl,  (CatBoostClassifier, XGBClassifier, LogisticRegression, SGDClassifier)):
-        #     raw_shap = explainer.shap_values(X_test) #, nsamples=100)
-        #     # if list of arrays ([neg, pos]), take pos‐class
-        #     if isinstance(raw_shap, list):
-        #         raw_shap = raw_shap[1]
-        #     shap_values_dict[name] = raw_shap
-        #     print(f"{name} SHAP values done")
-        #     print(f"Time to compute SHAP values: {time.time() - now}")
-
-        # # — compute preds & probabilities —
-        # y_pred  = mdl.predict(X_test)
-        # y_proba = mdl.predict_proba(X_test)[:,1]
-
-        # single_model_metrics = {
-        #     'model'    : name,
-        #     'accuracy' : accuracy_score(y_test, y_pred),
-        #     'precision': precision_score(y_test, y_pred),
-        #     'recall'   : recall_score(y_test, y_pred),
-        #     'f1'       : f1_score(y_test, y_pred),
-        #     'roc_auc'  : roc_auc_score(y_test, y_proba),
-        #     'brier'    : brier_score_loss(y_test, y_proba),
-        # }
-
-        # print(single_model_metrics)
-        # print(f"Time to compute 80/20 model {name}: {time.time() - model_start}")
 
         y_temp = df_long["returns"]
         y_temp.index = df_long['date']
@@ -3348,9 +3197,6 @@ def main(rolling_train_length=2100,
 
         # — compute metrics dict —
         metrics_list.append(agg_df)
-        # preds_df = pd.DataFrame(df_long["date"].iloc[split:])
-        # preds_df["prediction"] = y_pred
-        # preds_df["pred_proba"] = y_proba
         preds_df["model"] = name
         preds_df["uuid"] = uuid
         preds_df["runtime"] = current_time
@@ -3358,44 +3204,13 @@ def main(rolling_train_length=2100,
         append_to_bigquery(preds_df, DESTINATION_DATASET, f'model-predictions-{table_suffix}')
         print(f"Time to compute whole model {name}: {time.time() - model_start}")
 
-    # ——— 4) flatten SHAP into list of dicts ——
-    # feat_names = feature_columns
-    # shap_summary = []
-
-    # for name, raw_shap in shap_values_dict.items():
-    #     # raw_shap: (n_samples, n_feats)
-    #     n_feats = raw_shap.shape[1]
-    #     # make sure your feature list lines up with raw_shap
-    #     used_feats = feature_columns[:n_feats]
-
-    #     for j, feat in enumerate(used_feats):
-    #         vals = raw_shap[:, j]
-    #         shap_summary.append({
-    #             'model'       : name,
-    #             'feature'     : feat,
-    #             # average over days
-    #             'mean_shap'   : np.mean(vals),
-    #             # peak effect over days
-    #             'max_shap'    : np.max(np.abs(vals)),
-    #             # if you want absolute instead:
-    #             # 'mean_abs_shap': np.mean(np.abs(vals)),
-    #             # 'max_abs_shap' : np.max(np.abs(vals)),
-    #         })
-
-
-    # # ——— 5) save SHAP values and metrics to BigQuery ——
-    # df_l0_metrics = pd.DataFrame(metrics_list)
-    # df_l0_metrics['runtime'] = current_time
-    # df_l0_metrics['uuid'] = uuid
-    # df_l0_shap     = pd.DataFrame(shap_summary)
-    # df_l0_shap['runtime'] = current_time
-    # df_l0_shap['uuid'] = uuid
-
     all_predictions = pd.concat(proba_dfs)
-    # append_to_bigquery(all_predictions, DESTINATION_DATASET, f'model-predictions-{table_suffix}')
-    # append_to_bigquery(df_l0_shap, DESTINATION_DATASET, f'sub-meta-model-shap')
     all_predictions = pd.concat(proba_dfs)
     all_predictions = all_predictions[all_predictions["y_test_index"] == 0]
+
+    ###################################################################################
+    # 4. Evaluate the model performance ‑‑‑‑‑ simple average version
+    ###################################################################################
 
     preds_df = (
         all_predictions
@@ -3418,10 +3233,6 @@ def main(rolling_train_length=2100,
     preds_df = pd.merge(preds_df, all_predictions[["date", "y_test"]], on="date", how="left").drop_duplicates()
     append_to_bigquery(preds_df, DESTINATION_DATASET, f'model-predictions-{table_suffix}')
 
-
-    ###################################################################################
-    # 4. Evaluate the model performance ‑‑‑‑‑ multiclass version
-    ###################################################################################
     import numpy as np
     from sklearn.metrics import (accuracy_score, precision_score, recall_score,
                                 f1_score, roc_auc_score, log_loss,

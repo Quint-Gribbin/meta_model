@@ -27,7 +27,8 @@ https://console.cloud.google.com/vertex-ai/colab/notebooks?inv=1&invt=AbwqdQ&pro
 We see better performance from standard neutral zone than the custom distribution (Total, rolling 5)
 We see essentially the same performance at a 3 day rolling compared to a 5 day rolling (Total)
 Adjusting allocation logic does increase performance 
-SHAP values
+SHAP values and subsequent model testing
+
 
 Recommended trial logic for 
 
