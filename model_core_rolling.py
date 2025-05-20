@@ -133,6 +133,8 @@ def main(rolling_train_length=2100,
     test['core_model'] = test[core_model_column] / 100 # total_return
     # test = test.set_index("date")
     df_port = test[['core_model', 'date']]
+    df_port['date'] = df_port['date'].shift(-1)
+    df_port = df_port.dropna()
 
 
     ##########################################################################
@@ -1182,6 +1184,7 @@ def main(rolling_train_length=2100,
     # # Concatenate with other features
     # df_long = pd.concat([df_long, cross_asset_features], axis=1)
 
+    # TODO: Add more logic here
     cluster_rank_query = f"SELECT * FROM `issachar-feature-library.qjg.meta-model-daily-spreads`"
     cluster_rank_df = pd.read_gbq(cluster_rank_query, project_id='issachar-feature-library', use_bqstorage_api=True)
     cluster_rank_pivoted = cluster_rank_df.pivot_table(index='date', columns='cluster', values='total_return').sort_values("date").shift(1)

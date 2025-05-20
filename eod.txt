@@ -27,10 +27,24 @@ https://console.cloud.google.com/vertex-ai/colab/notebooks?inv=1&invt=AbwqdQ&pro
 We see better performance from standard neutral zone than the custom distribution (Total, rolling 5)
 We see essentially the same performance at a 3 day rolling compared to a 5 day rolling (Total)
 Adjusting allocation logic does increase performance 
-SHAP values and subsequent model testing
+Model testing indicate using all features outperforms a feature subset 
+SHAP analysis raises no flags for leakage
 
 
 Recommended trial logic for 
 
 
 rolling_window=5
+
+
+XGBoost__2025-05-14 11:22:31.891394__model=Meta_Model__rolling_train_length=2100__rolling_test_length=21__n_k=8__holdout_start=2022-01-01__batch_size=512__learning_rate=0.0008__optuna_runs=50__random_seed=42__gcs_bucket=test_model_plots__include_fundamentals=0__include_will_features=0__notes=no notes__epochs=3000__addition_technical=0__additional_factors=2__act_func=swish__table_suffix=V003_testing__use_correlations=0__will_portfolios=0__calculate_shap=1__calculate_ww=1__clamp_gradients=1__c...
+
+TeamMosiac#
+
+Re-run the shap analysis for only index of 1 day
+
+Accuracy metrics
+1 day
+Long - Short
+350 features
+No Will features
